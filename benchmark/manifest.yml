@@ -18,7 +18,7 @@ reference_runner:
 profiles:
   validation:
     scored: false
-    expected_verification_digest: 4f82d144178882b0f44306b69f4198dbc1e4a11a5363d69c872150f54f51cce6
+    expected_verification_digest: 30c1e519e5c0de35c825390a34f2601dbfd525c02f644c7fb34620381b3f9155
     minimum_runner:
       cpu_count: 2
       memory_bytes: 4294967296
@@ -62,6 +62,21 @@ profiles:
           - bin/rails
           - runner
           - benchmark/harness/workloads/disk_active_storage.rb
+      - name: memory-import
+        timeout_seconds: 120
+        parameters:
+          row_count: 20000
+          project_count: 37
+          retained_bytes: 67108864
+          allocation_chunk_bytes: 1048576
+        expected_verification_digest: b43c19c7238a3d38a04f1894c37db2f05ae8fe307481d2b981841d80b3632e4a
+        limits:
+          peak_rss_bytes: 1073741824
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
+        command:
+          - ruby
+          - benchmark/harness/workloads/memory_import.rb
   smoke:
     scored: false
     expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d

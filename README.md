@@ -36,6 +36,7 @@ before starting work.
 ```console
 bin/bench run --profile validation --workload rails-postgres
 bin/bench run --profile validation --workload disk-active-storage
+bin/bench run --profile validation --workload memory-import
 ```
 
 Validation-scale parameters stay small enough for local iteration; the same

@@ -379,7 +379,10 @@ multi-file generation, upload/download, archive/extract/copy, a MiniMagick
 variant, and synchronous record-and-byte cleanup. Its concurrent source,
 storage, download, archive, extract, and copy trees amplify source bytes by
 about six times, so calibration will keep source artifacts at or below 1.5 GiB
-and the measured peak below the benchmark's 10 GiB disk envelope.
+and the measured peak below the benchmark's 10 GiB disk envelope. The memory
+group now streams deterministic CSV and NDJSON imports separately from
+incompressible retained allocations, so row volume and the eventual 5–7 GiB
+high-water mark can be calibrated independently.
 
 ## Delivery strategy
 
