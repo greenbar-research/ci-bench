@@ -103,6 +103,12 @@ module CiBench
           format_bytes(runner.fetch("disk_available_bytes"))
         )
       ]
+      workload_names = @manifest.fetch("profiles").fetch(@profile).fetch("workloads")
+        .map { |workload| workload.fetch("name") }
+      if workload_names.include?("disk-active-storage")
+        checks << command_check("ImageMagick", "magick", "-version")
+        checks << command_check("tar", "tar", "--version")
+      end
 
       checks.each do |item|
         marker = item.fetch(:ok) ? "ok" : "FAIL"

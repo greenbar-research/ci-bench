@@ -18,7 +18,7 @@ reference_runner:
 profiles:
   validation:
     scored: false
-    expected_verification_digest: 44de85abb9a087c436465cb6befac3706229cc4c8d3afbd173f873459d801f23
+    expected_verification_digest: 4f82d144178882b0f44306b69f4198dbc1e4a11a5363d69c872150f54f51cce6
     minimum_runner:
       cpu_count: 2
       memory_bytes: 4294967296
@@ -46,6 +46,22 @@ profiles:
           - bin/rails
           - runner
           - benchmark/harness/workloads/rails_postgres.rb
+      - name: disk-active-storage
+        timeout_seconds: 120
+        parameters:
+          artifact_count: 4
+          bytes_per_artifact: 2097152
+          image_dimension: 256
+          transformed_dimension: 64
+        expected_verification_digest: 81ea59abfa5bf64980cbc7f65b9581e83e4a50276def78ca6a651a5630905145
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/disk_active_storage.rb
   smoke:
     scored: false
     expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d

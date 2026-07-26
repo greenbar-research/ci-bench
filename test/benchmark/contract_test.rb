@@ -8,23 +8,24 @@ class BenchmarkContractTest < ActiveSupport::TestCase
   MANIFEST_PATH = Rails.root.join("benchmark/manifest.yml")
   SCHEMA_PATH = Rails.root.join("benchmark/schema/result-v1.json")
 
-  test "manifest pins the smoke profile and toolchain" do
+  test "manifest pins the validation and smoke profiles with the toolchain" do
     manifest = YAML.safe_load_file(MANIFEST_PATH)
 
     assert_equal "ci-bench-v1", manifest.fetch("benchmark_version")
     assert_equal %w[database file-io browser],
       manifest.dig("profiles", "smoke", "workloads").map { |workload| workload.fetch("name") }
-    assert_equal %w[rails-postgres],
+    assert_equal %w[rails-postgres disk-active-storage],
       manifest.dig("profiles", "validation", "workloads").map { |workload| workload.fetch("name") }
     validation = manifest.dig("profiles", "validation")
     assert_match(/\A[0-9a-f]{64}\z/, validation.fetch("expected_verification_digest"))
     validation.fetch("workloads").each do |workload|
       assert_match(/\A[0-9a-f]{64}\z/, workload.fetch("expected_verification_digest"))
-      assert_operator workload.dig("parameters", "insert_batch_size"), :>, 0
-      assert_operator ActiveRecord::Base.connection_pool.size,
-        :>=,
-        workload.dig("parameters", "concurrency_threads") + 1
     end
+    rails_postgres = validation.fetch("workloads").find { |workload| workload.fetch("name") == "rails-postgres" }
+    assert_operator rails_postgres.dig("parameters", "insert_batch_size"), :>, 0
+    assert_operator ActiveRecord::Base.connection_pool.size,
+      :>=,
+      rails_postgres.dig("parameters", "concurrency_threads") + 1
     assert_equal RUBY_VERSION, manifest.dig("toolchain", "ruby")
     assert_match(/\A[0-9a-f]{64}\z/, manifest.dig("profiles", "smoke", "expected_verification_digest"))
   end

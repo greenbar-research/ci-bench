@@ -373,7 +373,13 @@ first implemented mechanism: it streams deterministic relational fixtures,
 executes ORM transactions, repeats aggregate reports, and applies atomic
 concurrent updates. Its validation profile is pinned and unscored; calibration
 scale remains pending. PostgreSQL uses a 1.5 GiB tmpfs cap, and each workload
-reports its database bytes into the benchmark disk limit.
+reports its database bytes into the benchmark disk limit. The disk and Active
+Storage group is also implemented at validation scale, covering deterministic
+multi-file generation, upload/download, archive/extract/copy, a MiniMagick
+variant, and synchronous record-and-byte cleanup. Its concurrent source,
+storage, download, archive, extract, and copy trees amplify source bytes by
+about six times, so calibration will keep source artifacts at or below 1.5 GiB
+and the measured peak below the benchmark's 10 GiB disk envelope.
 
 ## Delivery strategy
 

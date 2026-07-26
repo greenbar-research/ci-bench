@@ -29,10 +29,13 @@ services.
 checks their digests against the checked-in checksum manifest.
 
 Slice 2 workload mechanisms land first in the unscored validation profile. Run
-the current Rails/PostgreSQL group independently with:
+the current groups independently with the commands below. The disk group also
+requires ImageMagick 7 (`magick`) and `tar`; `bin/bench doctor` checks both
+before starting work.
 
 ```console
 bin/bench run --profile validation --workload rails-postgres
+bin/bench run --profile validation --workload disk-active-storage
 ```
 
 Validation-scale parameters stay small enough for local iteration; the same

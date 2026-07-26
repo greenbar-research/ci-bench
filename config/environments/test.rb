@@ -31,6 +31,8 @@ Rails.application.configure do
 
   # Store uploaded files on the local file system in a temporary directory.
   config.active_storage.service = :test
+  config.active_storage.variant_processor = :mini_magick
+  config.active_storage.variable_content_types += ["image/x-portable-pixmap"]
 
   # Print deprecation notices to the stderr.
   config.active_support.deprecation = :stderr
