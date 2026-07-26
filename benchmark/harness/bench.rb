@@ -347,6 +347,12 @@ module CiBench
     def prepare
       Command.capture!("bin/ci/services")
       Command.capture!("bin/rails", "db:prepare", env: { "RAILS_ENV" => "test" })
+      Command.capture!(
+        "bin/rails",
+        "runner",
+        "benchmark/harness/reset_database.rb",
+        env: { "RAILS_ENV" => "test" }
+      )
       FileUtils.rm_rf(File.join(ROOT, "tmp/bench"))
       FileUtils.mkdir_p(File.join(ROOT, "tmp/bench"))
     end

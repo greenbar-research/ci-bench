@@ -1,0 +1,50 @@
+<main>
+  <%= link_to "All projects", projects_path %>
+  <h1><%= @project.name %></h1>
+
+  <section aria-label="Build report">
+    <h2>Build report</h2>
+    <dl>
+      <dt>Total</dt>
+      <dd><%= @project.builds.count %></dd>
+      <dt>Passed</dt>
+      <dd><%= @project.builds.where(state: "passed").count %></dd>
+      <dt>Failed</dt>
+      <dd><%= @project.builds.where(state: "failed").count %></dd>
+    </dl>
+  </section>
+
+  <nav aria-label="Build filters">
+    <%= link_to "All", project_path(@project) %>
+    <%= link_to "Passed", project_path(@project, state: "passed") %>
+    <%= link_to "Failed", project_path(@project, state: "failed") %>
+  </nav>
+
+  <%= form_with model: [@project, Build.new] do |form| %>
+    <%= form.label :number %>
+    <%= form.number_field :number, min: 0, required: true %>
+    <%= form.label :commit_sha %>
+    <%= form.text_field :commit_sha, required: true %>
+    <%= form.label :state %>
+    <%= form.select :state, Build::STATES %>
+    <%= form.label :duration_ms %>
+    <%= form.number_field :duration_ms, min: 0, required: true %>
+    <%= form.submit "Create build" %>
+  <% end %>
+
+  <table>
+    <thead>
+      <tr><th>Number</th><th>Commit</th><th>State</th><th>Duration</th></tr>
+    </thead>
+    <tbody>
+      <% @builds.each do |build| %>
+        <tr>
+          <td><%= build.number %></td>
+          <td><%= build.commit_sha %></td>
+          <td><%= build.state %></td>
+          <td><%= build.duration_ms %> ms</td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</main>

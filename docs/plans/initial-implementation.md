@@ -354,7 +354,7 @@ schema, and deterministic database, file-I/O, and Playwright browser workloads.
 `bin/bench doctor --profile smoke` passes on the development host. Repeated
 smoke runs complete in under ten seconds and produce the pinned verification
 digest
-`949d278b75f99a1f946525f568d478c36ea98bea91bdc61bfa360a321bf3ad64`.
+`4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d`.
 The smoke profile records dirty-tree provenance and remains explicitly
 unscored.
 
@@ -365,8 +365,10 @@ same measurement mechanism.
 The harness-contract step is complete: workload parameters, timeouts, resource
 limits, expected digests, partial workload runs, verification/telemetry
 separation, canonical digesting, scoped disk cleanup, and deterministic fixture
-checks are implemented. The next work is the Rails domain expansion and the six
-full workload groups at validation scale.
+checks are implemented. The Rails domain now includes users and sessions,
+project ownership, builds and test cases, artifact metadata and Active Storage,
+audit events, and deterministic build-report filtering. The next work is the
+six full workload groups at validation scale.
 
 ## Delivery strategy
 

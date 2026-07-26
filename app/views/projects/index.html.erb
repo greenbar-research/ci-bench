@@ -1,6 +1,15 @@
 <main>
   <h1>CI projects</h1>
 
+  <nav>
+    <% if current_user %>
+      Signed in as <%= current_user.email %>
+      <%= button_to "Sign out", session_path, method: :delete %>
+    <% else %>
+      <%= link_to "Sign in", new_session_path %>
+    <% end %>
+  </nav>
+
   <%= form_with model: Project.new do |form| %>
     <%= form.label :name %>
     <%= form.text_field :name, required: true %>
@@ -9,7 +18,7 @@
 
   <ul aria-label="Projects">
     <% @projects.each do |project| %>
-      <li><%= project.name %></li>
+      <li><%= link_to project.name, project %></li>
     <% end %>
   </ul>
 </main>

@@ -11,5 +11,12 @@ module ActiveSupport
     fixtures :all
 
     # Add more helper methods to be used by all tests here...
+    def with_failing_audit_events
+      original_create = AuditEvent.method(:create!)
+      AuditEvent.define_singleton_method(:create!) { |*| raise ActiveRecord::RecordInvalid }
+      yield
+    ensure
+      AuditEvent.define_singleton_method(:create!, original_create)
+    end
   end
 end

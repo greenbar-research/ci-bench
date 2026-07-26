@@ -26,7 +26,9 @@ profiles:
     workloads:
       - name: database
         timeout_seconds: 120
-        parameters: {}
+        parameters:
+          project_count: 120
+          builds_per_project: 4
         expected_verification_digest: 289a23c6ce173de54755c13b149155b2d57e44f306c3dc5c6539eaf29b6a9516
         limits:
           peak_rss_bytes: 2147483648

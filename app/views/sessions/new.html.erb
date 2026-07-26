@@ -1,0 +1,15 @@
+<main>
+  <h1>Sign in</h1>
+
+  <% if flash[:alert] %>
+    <p role="alert"><%= flash[:alert] %></p>
+  <% end %>
+
+  <%= form_with url: session_path do |form| %>
+    <%= form.label :email %>
+    <%= form.email_field :email, required: true %>
+    <%= form.label :password %>
+    <%= form.password_field :password, required: true %>
+    <%= form.submit "Sign in" %>
+  <% end %>
+</main>
