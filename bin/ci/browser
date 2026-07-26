@@ -3,13 +3,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+suite="${1:-smoke}"
+if [[ "$suite" != "smoke" && "$suite" != "validation" ]]; then
+  echo "unknown browser suite: ${suite}" >&2
+  exit 1
+fi
+
 port="${BENCH_PORT:-3100}"
-log_path="tmp/bench/rails-server.log"
+log_path="tmp/bench/rails-server-${suite}.log"
 mkdir -p "$(dirname "$log_path")"
 
 if curl --fail --silent "http://127.0.0.1:${port}/up" >/dev/null 2>&1; then
   echo "port ${port} already serves a healthy process; refusing to use a stale server" >&2
   exit 1
+fi
+
+if [[ "$suite" == "validation" ]]; then
+  RAILS_ENV=test bin/rails runner benchmark/harness/browser/setup.rb
 fi
 
 RAILS_ENV=test bin/rails server --binding 127.0.0.1 --port "$port" >"$log_path" 2>&1 &
@@ -27,7 +37,7 @@ for _ in $(seq 1 240); do
       echo "Rails exited before becoming healthy; see ${log_path}" >&2
       exit 1
     fi
-    BENCH_BASE_URL="http://127.0.0.1:${port}" npm run test:browser
+    BENCH_BASE_URL="http://127.0.0.1:${port}" npx playwright test "${suite}.spec.js"
     exit 0
   fi
   sleep 0.25

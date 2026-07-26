@@ -367,8 +367,8 @@ limits, expected digests, partial workload runs, verification/telemetry
 separation, canonical digesting, scoped disk cleanup, and deterministic fixture
 checks are implemented. The Rails domain now includes users and sessions,
 project ownership, builds and test cases, artifact metadata and Active Storage,
-audit events, and deterministic build-report filtering. Five of the six full
-workload groups are implemented at validation scale. The Rails/PostgreSQL group
+audit events, and deterministic build-report filtering. All six full workload
+groups are implemented at validation scale. The Rails/PostgreSQL group
 streams deterministic relational fixtures,
 executes ORM transactions, repeats aggregate reports, and applies atomic
 concurrent updates. Its validation profile is pinned and unscored; calibration
@@ -388,7 +388,10 @@ rendering, and JSON serialization across four worker processes. The Docker
 group builds the production application image with BuildKit, verifies its
 layers and runtime metadata, boots it against a scoped PostgreSQL database,
 checks its health and deterministic Rails output, accounts for exact daemon
-disk bytes, and removes scoped containers and images on success or failure.
+disk bytes, and removes scoped containers and images on success or failure. The
+browser system group drives authentication, project and build creation, test
+result filtering, report totals, artifact upload, and sign-out through
+Chromium, with generated inputs and verification digests kept deterministic.
 
 ## Delivery strategy
 

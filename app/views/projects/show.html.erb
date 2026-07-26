@@ -20,6 +20,41 @@
     <%= link_to "Failed", project_path(@project, state: "failed") %>
   </nav>
 
+  <section aria-label="Test report">
+    <h2>Test report</h2>
+    <dl>
+      <dt>Total</dt>
+      <dd><%= @project.builds.joins(:test_cases).count %></dd>
+      <% ::TestCase::STATES.each do |state| %>
+        <dt><%= state.capitalize %></dt>
+        <dd><%= @project.builds.joins(:test_cases).where(test_cases: { state: state }).count %></dd>
+      <% end %>
+    </dl>
+  </section>
+
+  <nav aria-label="Test result filters">
+    <%= link_to "All", project_path(@project) %>
+    <% ::TestCase::STATES.each do |state| %>
+      <%= link_to state.capitalize, project_path(@project, test_state: state) %>
+    <% end %>
+  </nav>
+
+  <table aria-label="Test results">
+    <thead>
+      <tr><th>Name</th><th>Build</th><th>State</th><th>Duration</th></tr>
+    </thead>
+    <tbody>
+      <% @test_cases.each do |test_case| %>
+        <tr>
+          <td><%= test_case.name %></td>
+          <td><%= test_case.build.number %></td>
+          <td><%= test_case.state %></td>
+          <td><%= test_case.duration_ms %> ms</td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+
   <%= form_with model: [@project, Build.new] do |form| %>
     <%= form.label :number %>
     <%= form.number_field :number, min: 0, required: true %>
@@ -47,4 +82,38 @@
       <% end %>
     </tbody>
   </table>
+
+  <% @project.builds.order(:number).each do |build| %>
+    <section aria-label="Build <%= build.number %> details">
+      <h2>Build <%= build.number %> details</h2>
+
+      <%= form_with model: [@project, build, ::TestCase.new], namespace: "build_#{build.id}" do |form| %>
+        <%= form.label :name, "Test name" %>
+        <%= form.text_field :name, required: true %>
+        <%= form.label :state, "Test state" %>
+        <%= form.select :state, ::TestCase::STATES %>
+        <%= form.label :duration_ms, "Test duration ms" %>
+        <%= form.number_field :duration_ms, min: 0, required: true %>
+        <%= form.submit "Add test result" %>
+      <% end %>
+
+      <%= form_with url: project_build_artifacts_path(@project, build),
+            scope: :artifact,
+            namespace: "build_#{build.id}",
+            multipart: true do |form| %>
+        <%= form.label :file, "Artifact file" %>
+        <%= form.file_field :file, required: true %>
+        <%= form.submit "Upload artifact" %>
+      <% end %>
+
+      <ul aria-label="Build <%= build.number %> artifacts">
+        <% build.artifacts.order(:name).each do |artifact| %>
+          <li>
+            <%= link_to artifact.name, rails_blob_path(artifact.file, disposition: "attachment") %>
+            (<%= artifact.byte_size %> bytes)
+          </li>
+        <% end %>
+      </ul>
+    </section>
+  <% end %>
 </main>

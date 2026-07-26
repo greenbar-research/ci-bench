@@ -42,6 +42,25 @@ class ProjectsControllerTest < ActionDispatch::IntegrationTest
     assert_select "tbody", text: /#{Regexp.escape("2" * 40)}/
   end
 
+  test "filters test results and preserves report totals" do
+    project = Project.create!(name: "test-filter-demo")
+    build = project.builds.create!(
+      number: 1,
+      commit_sha: "3" * 40,
+      state: "failed",
+      duration_ms: 300
+    )
+    build.test_cases.create!(name: "passes", state: "passed", duration_ms: 10)
+    build.test_cases.create!(name: "fails", state: "failed", duration_ms: 20)
+
+    get project_path(project, test_state: "failed")
+
+    assert_response :success
+    assert_select "table[aria-label='Test results'] tbody tr", count: 1
+    assert_select "table[aria-label='Test results'] tbody", text: /fails/
+    assert_select "section[aria-label='Test report']", text: /Total\s*2/
+  end
+
   test "rolls back project creation when its audit event fails" do
     assert_no_difference ["Project.count", "AuditEvent.count"] do
       with_failing_audit_events do

@@ -14,7 +14,7 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     assert_equal "ci-bench-v1", manifest.fetch("benchmark_version")
     assert_equal %w[database file-io browser],
       manifest.dig("profiles", "smoke", "workloads").map { |workload| workload.fetch("name") }
-    assert_equal %w[rails-postgres disk-active-storage memory-import cpu-assets docker],
+    assert_equal %w[rails-postgres disk-active-storage memory-import cpu-assets docker browser-system],
       manifest.dig("profiles", "validation", "workloads").map { |workload| workload.fetch("name") }
     validation = manifest.dig("profiles", "validation")
     assert_match(/\A[0-9a-f]{64}\z/, validation.fetch("expected_verification_digest"))

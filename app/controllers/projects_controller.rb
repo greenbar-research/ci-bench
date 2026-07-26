@@ -7,6 +7,12 @@ class ProjectsController < ApplicationController
     @project = Project.find(params[:id])
     @builds = @project.builds.order(number: :desc, id: :desc)
     @builds = @builds.where(state: params[:state]) if Build::STATES.include?(params[:state])
+    @test_cases = TestCase.joins(:build)
+      .where(builds: { project_id: @project.id })
+      .order(:name, :id)
+    if TestCase::STATES.include?(params[:test_state])
+      @test_cases = @test_cases.where(state: params[:test_state])
+    end
   end
 
   def create

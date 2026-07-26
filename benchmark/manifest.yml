@@ -18,7 +18,7 @@ reference_runner:
 profiles:
   validation:
     scored: false
-    expected_verification_digest: ca7db7bbc28a143f5b98bc104704c8146bc4fb82e0aa77decb18613e11091a08
+    expected_verification_digest: ed17bbe58a7e29a484d900f26a19d176de8c197b1de2b50df13b07cd73eb86db
     minimum_runner:
       cpu_count: 2
       memory_bytes: 4294967296
@@ -107,6 +107,19 @@ profiles:
         command:
           - ruby
           - benchmark/harness/workloads/docker.rb
+      - name: browser-system
+        timeout_seconds: 120
+        parameters:
+          artifact_bytes: 65536
+          flow_iterations: 2
+        expected_verification_digest: 7d52ddc0f6ec4893cfbdbbfbcf76f5b671e924437645361ec34ec72aa9c0eb1d
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
+        command:
+          - bin/ci/browser
+          - validation
   smoke:
     scored: false
     expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d
