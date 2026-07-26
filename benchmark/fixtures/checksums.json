@@ -1,0 +1,19 @@
+{
+  "seed": 20260726,
+  "fixtures": [
+    {
+      "name": "binary-1mib",
+      "kind": "binary",
+      "bytes": 1048576,
+      "stream": "contract",
+      "sha256": "bb0cc8e38e22e049876d12c86a1b3ccc04ed705e855fb380a92bff158ee1b1d4"
+    },
+    {
+      "name": "text-1mib",
+      "kind": "text",
+      "bytes": 1048576,
+      "stream": "contract",
+      "sha256": "c9e9d848bded9cf3c42acb9568d7b77ca57e38e7ab671df38e39b2f8a6685d76"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 schema_version: 1
 benchmark_version: ci-bench-v1
+seed: 20260726
 
 toolchain:
   ruby: 3.4.10
@@ -17,22 +18,42 @@ reference_runner:
 profiles:
   smoke:
     scored: false
-    timeout_seconds: 120
-    expected_verification_digest: 949d278b75f99a1f946525f568d478c36ea98bea91bdc61bfa360a321bf3ad64
+    expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d
     minimum_runner:
       cpu_count: 2
       memory_bytes: 4294967296
       disk_available_bytes: 2147483648
     workloads:
       - name: database
+        timeout_seconds: 120
+        parameters: {}
+        expected_verification_digest: 289a23c6ce173de54755c13b149155b2d57e44f306c3dc5c6539eaf29b6a9516
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
         command:
           - bin/rails
           - runner
           - benchmark/harness/workloads/database.rb
       - name: file-io
+        timeout_seconds: 120
+        parameters: {}
+        expected_verification_digest: 0290515985e1551163b258922c4e690fd0163a59a5b59677ef40e5c48fd793fe
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
         command:
           - ruby
           - benchmark/harness/workloads/file_io.rb
       - name: browser
+        timeout_seconds: 120
+        parameters: {}
+        expected_verification_digest: 20abbff58de1f30a6b892b158af57918c059c996808543530c8b28d9bd48e905
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
         command:
           - bin/ci/browser

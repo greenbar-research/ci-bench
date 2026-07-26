@@ -14,6 +14,9 @@ test("creates and lists a project", async ({ page }) => {
 
   fs.writeFileSync(
     outputPath,
-    JSON.stringify({ project_name: name, visible: true }) + "\n"
+    JSON.stringify({
+      verification: { project_name: name, visible: true },
+      telemetry: {}
+    }) + "\n"
   );
 });

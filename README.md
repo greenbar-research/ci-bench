@@ -14,6 +14,7 @@ Install [mise](https://mise.jdx.dev/) and Docker, then run:
 ```console
 mise install
 bin/setup
+bin/bench fixtures
 bin/bench doctor --profile smoke
 bin/bench run --profile smoke
 ```
@@ -23,6 +24,9 @@ database, file-I/O, and Playwright browser workloads, then writes a validated
 JSON record under `results/`. It is intentionally small and is not a scored
 provider result. Run `docker compose down` when you no longer need the local
 services.
+
+`bin/bench fixtures` regenerates the small contract fixtures in memory and
+checks their digests against the checked-in checksum manifest.
 
 See [the implementation plan](docs/plans/initial-implementation.md) for the
 benchmark contract and remaining delivery slices.

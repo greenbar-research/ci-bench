@@ -273,6 +273,9 @@ it contains:
   "benchmark_version": "ci-bench-v1",
   "run_id": "opaque-id",
   "commit_sha": "full-sha",
+  "git_dirty": false,
+  "partial": false,
+  "scored": true,
   "target": "github-actions",
   "profile": "warm-serial",
   "scenario": "ruby-dependency",
@@ -355,10 +358,15 @@ digest
 The smoke profile records dirty-tree provenance and remains explicitly
 unscored.
 
-Before Slice 2 calibration, CPU sampling must move from platform-specific
-`ps %cpu` values to per-interval process CPU-time deltas. The current values are
-useful smoke telemetry, but Linux and macOS calculate `%cpu` differently and
-the samples are not comparable.
+Slice 2 harness work is active. CPU samples now use per-process CPU-time deltas
+rather than platform-specific `ps %cpu` values, so Linux and macOS share the
+same measurement mechanism.
+
+The harness-contract step is complete: workload parameters, timeouts, resource
+limits, expected digests, partial workload runs, verification/telemetry
+separation, canonical digesting, scoped disk cleanup, and deterministic fixture
+checks are implemented. The next work is the Rails domain expansion and the six
+full workload groups at validation scale.
 
 ## Delivery strategy
 
@@ -381,6 +389,24 @@ Definition of done:
 Implement each workload group and deterministic fixture generator. Add
 correctness manifests and resource limits before scaling fixture sizes.
 Calibrate on the standard public GitHub-hosted runner.
+
+Start with a harness-contract step before implementing workload groups:
+
+- Split deterministic verification values from host-dependent telemetry.
+- Canonically digest verification objects and reject floating-point values.
+- Put seed, parameters, timeout, resource limits, and expected verification on
+  each manifest workload.
+- Support `bin/bench run --profile full --workload NAME` so every group can run
+  and verify independently.
+- Throttle disk-size sampling so the observer does not materially perturb
+  multi-gigabyte I/O, and account for Active Storage and Docker-owned bytes.
+
+Slice 2 may add one temporary, explicitly unscored GitHub Actions calibration
+workflow. It installs the pinned toolchain and runs only the full serial
+profile, with no benchmark caches, sharding, cold/warm orchestration, scheduled
+runs, or publication. This is the minimum mechanism needed to complete the five
+reference runs in this slice; Slice 3 replaces it with the scored Actions
+baseline.
 
 Definition of done:
 

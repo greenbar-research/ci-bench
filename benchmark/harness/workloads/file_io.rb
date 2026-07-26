@@ -27,5 +27,11 @@ result = {
   copies: 1,
   digest: source_digest
 }
-File.write(output_path, JSON.generate(result) << "\n")
+File.write(
+  output_path,
+  JSON.generate(
+    "verification" => result,
+    "telemetry" => { "peak_benchmark_disk_bytes" => File.size(source) + File.size(copy) }
+  ) << "\n"
+)
 FileUtils.rm_rf(directory)

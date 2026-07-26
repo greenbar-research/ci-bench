@@ -9,6 +9,7 @@ require "rbconfig"
 require "securerandom"
 require "time"
 require "yaml"
+require_relative "../fixtures/generator"
 
 module CiBench
   ROOT = File.expand_path("../..", __dir__)
@@ -17,6 +18,7 @@ module CiBench
 
   class Error < StandardError; end
   class InvalidResult < Error; end
+  class SchemaError < InvalidResult; end
 
   module Command
     module_function
@@ -142,10 +144,16 @@ module CiBench
 
   class Sampler
     SAMPLE_INTERVAL = 0.25
+    DISK_SAMPLE_INTERVAL = 2.0
 
     def initialize(workload)
       @workload = workload
       @samples = []
+      @cpu_seconds = {}
+      @sampled_at = nil
+      @disk_sampled_at = nil
+      @disk_used_bytes = 0
+      @disk_available_bytes = 0
     end
 
     attr_reader :samples
@@ -209,21 +217,73 @@ module CiBench
       end
 
       selected = processes.values_at(*pids).compact
+      sampled_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      cpu_seconds = pids.to_h { |pid| [pid, processes.dig(pid, :cpu_seconds) || 0.0] }
+      cpu_delta = if @sampled_at
+        cpu_seconds.sum do |pid, seconds|
+          [seconds - @cpu_seconds.fetch(pid, 0.0), 0.0].max
+        end
+      else
+        0.0
+      end
+      sample_interval = @sampled_at ? sampled_at - @sampled_at : sampled_at - started
+      cpu_percent = sample_interval.positive? ? cpu_delta.fdiv(sample_interval) * 100 : 0.0
+      refresh_disk(sampled_at) if @disk_sampled_at.nil? || sampled_at - @disk_sampled_at >= DISK_SAMPLE_INTERVAL
+
       @samples << {
         "elapsed_ms" => elapsed_ms(started),
         "workload" => @workload,
-        "cpu_percent" => selected.sum { |process| process.fetch(:cpu) }.round(2),
+        "cpu_percent" => cpu_percent.round(2),
         "rss_bytes" => selected.sum { |process| process.fetch(:rss_kib) } * 1_024,
-        "disk_used_bytes" => benchmark_disk_bytes,
-        "disk_available_bytes" => Host.disk_available_bytes
+        "disk_used_bytes" => @disk_used_bytes,
+        "disk_available_bytes" => @disk_available_bytes
       }
+      @cpu_seconds = cpu_seconds
+      @sampled_at = sampled_at
+    end
+
+    def refresh_disk(sampled_at)
+      @disk_used_bytes = benchmark_disk_bytes
+      @disk_available_bytes = Host.disk_available_bytes
+      @disk_sampled_at = sampled_at
+    rescue => error
+      warn "disk sampling failed for #{@workload}: #{error.message}"
     end
 
     def process_table
-      Command.capture!("ps", "-axo", "pid=,ppid=,rss=,%cpu=").lines.to_h do |line|
-        pid, ppid, rss_kib, cpu = line.split
-        [pid.to_i, { ppid: ppid.to_i, rss_kib: rss_kib.to_i, cpu: cpu.to_f }]
+      Command.capture!("ps", "-axo", "pid=,ppid=,rss=,time=").lines.to_h do |line|
+        pid, ppid, rss_kib, cpu_time = line.split
+        [
+          pid.to_i,
+          {
+            ppid: ppid.to_i,
+            rss_kib: rss_kib.to_i,
+            cpu_seconds: linux_cpu_seconds(pid.to_i) || parse_cpu_time(cpu_time)
+          }
+        ]
       end
+    end
+
+    def linux_cpu_seconds(pid)
+      path = "/proc/#{pid}/stat"
+      return unless File.exist?(path)
+
+      stat = File.read(path)
+      return unless (offset = stat.rindex(")"))
+
+      fields = stat.byteslice(offset + 2..).split
+      (fields.fetch(11).to_i + fields.fetch(12).to_i).fdiv(Etc.sysconf(Etc::SC_CLK_TCK))
+    rescue Errno::ENOENT, IndexError
+      nil
+    end
+
+    def parse_cpu_time(value)
+      parts = value.split(":")
+      seconds = parts.pop.to_f
+      minutes = parts.pop.to_i
+      hours_with_days = parts.pop || "0"
+      days, hours = hours_with_days.include?("-") ? hours_with_days.split("-").map(&:to_i) : [0, hours_with_days.to_i]
+      (days * 86_400) + (hours * 3_600) + (minutes * 60) + seconds
     end
 
     def benchmark_disk_bytes
@@ -239,10 +299,11 @@ module CiBench
   end
 
   class Runner
-    def initialize(manifest, profile, output_path)
+    def initialize(manifest, profile, output_path, workload_name: nil)
       @manifest = manifest
       @profile = profile
       @output_path = output_path
+      @workload_name = workload_name
       @workloads = []
       @samples = []
       @outputs = {}
@@ -258,7 +319,7 @@ module CiBench
       runner = Doctor.new(@manifest, @profile).check!
       prepare
 
-      @manifest.fetch("profiles").fetch(@profile).fetch("workloads").each do |workload|
+      selected_workloads.each do |workload|
         run_workload(workload)
       end
 
@@ -286,6 +347,7 @@ module CiBench
     def prepare
       Command.capture!("bin/ci/services")
       Command.capture!("bin/rails", "db:prepare", env: { "RAILS_ENV" => "test" })
+      FileUtils.rm_rf(File.join(ROOT, "tmp/bench"))
       FileUtils.mkdir_p(File.join(ROOT, "tmp/bench"))
     end
 
@@ -296,17 +358,34 @@ module CiBench
       sampler = Sampler.new(name)
       duration_ms = sampler.run(
         workload.fetch("command"),
-        env: { "RAILS_ENV" => "test", "BENCH_OUTPUT" => output_path },
-        timeout_seconds: @manifest.fetch("profiles").fetch(@profile).fetch("timeout_seconds")
+        env: {
+          "RAILS_ENV" => "test",
+          "BENCH_OUTPUT" => output_path,
+          "BENCH_PARAMS" => JSON.generate(workload.fetch("parameters")),
+          "BENCH_PROFILE" => @profile,
+          "BENCH_SEED" => @manifest.fetch("seed").to_s
+        },
+        timeout_seconds: workload.fetch("timeout_seconds")
       )
-      verification = JSON.parse(File.read(output_path))
+      payload = JSON.parse(File.read(output_path))
+      unless payload.keys.sort == %w[telemetry verification] &&
+          payload.fetch("verification").is_a?(Hash) &&
+          payload.fetch("telemetry").is_a?(Hash)
+        raise InvalidResult, "#{name} output must contain only verification and telemetry objects"
+      end
+
+      verification = payload.fetch("verification")
+      telemetry = payload.fetch("telemetry")
+      verify_workload!(workload, verification)
+      validate_limits!(workload, sampler.samples, telemetry)
       @outputs[name] = verification
       @samples.concat(sampler.samples)
       @workloads << {
         "name" => name,
         "status" => "passed",
         "duration_ms" => duration_ms,
-        "verification" => verification
+        "verification" => verification,
+        "telemetry" => telemetry
       }
       puts format("ok   %-24s %.2fs", name, duration_ms.fdiv(1_000))
     rescue => error
@@ -315,8 +394,9 @@ module CiBench
       @workloads << {
         "name" => name,
         "status" => "failed",
-        "duration_ms" => 0,
-        "verification" => {},
+        "duration_ms" => duration_ms || 0,
+        "verification" => verification || {},
+        "telemetry" => telemetry || {},
         "error" => message
       }
       raise
@@ -331,9 +411,11 @@ module CiBench
         "run_id" => SecureRandom.uuid,
         "commit_sha" => @commit_sha,
         "git_dirty" => @git_dirty,
+        "partial" => !@workload_name.nil?,
+        "scored" => @workload_name.nil? && @manifest.fetch("profiles").fetch(@profile).fetch("scored"),
         "target" => "local",
         "profile" => @profile,
-        "scenario" => "baseline",
+        "scenario" => @workload_name ? "workload:#{@workload_name}" : "baseline",
         "status" => status,
         "runner" => runner,
         "timeline" => {
@@ -345,24 +427,73 @@ module CiBench
         "caches" => [],
         "resources" => { "samples" => @samples },
         "verification" => {
-          "digest" => Digest::SHA256.hexdigest(JSON.generate(canonical_outputs)),
+          "digest" => verification_digest(canonical_outputs),
           "outputs" => canonical_outputs
         }
       }
     end
 
     def verify_expected_digest!
+      return if @workload_name
+
       expected = @manifest.fetch("profiles").fetch(@profile).fetch("expected_verification_digest")
-      actual = Digest::SHA256.hexdigest(JSON.generate(@outputs.sort.to_h))
+      actual = verification_digest(@outputs)
       return if actual == expected
 
       raise InvalidResult, "verification digest mismatch: expected #{expected}, got #{actual}"
     end
 
+    def verify_workload!(workload, verification)
+      expected = workload.fetch("expected_verification_digest")
+      actual = verification_digest(verification)
+      return if actual == expected
+
+      raise InvalidResult, "#{workload.fetch("name")} verification mismatch: expected #{expected}, got #{actual}"
+    end
+
+    def verification_digest(value)
+      Digest::SHA256.hexdigest(JSON.generate(canonical_verification(value)))
+    end
+
+    def canonical_verification(value)
+      case value
+      when Hash
+        value.keys.sort.to_h { |key| [key, canonical_verification(value.fetch(key))] }
+      when Array
+        value.map { |item| canonical_verification(item) }
+      when Float
+        raise InvalidResult, "verification values must not contain floating-point numbers"
+      else
+        value
+      end
+    end
+
+    def validate_limits!(workload, samples, telemetry)
+      limits = workload.fetch("limits")
+      peak_rss = ([telemetry["peak_rss_bytes"]] + samples.map { |sample| sample.fetch("rss_bytes") }).compact.max || 0
+      peak_disk = ([telemetry["peak_benchmark_disk_bytes"]] + samples.map { |sample| sample.fetch("disk_used_bytes") }).compact.max || 0
+      minimum_free_disk = samples.map { |sample| sample.fetch("disk_available_bytes") }.min || Host.disk_available_bytes
+
+      violations = []
+      violations << "peak RSS #{peak_rss} > #{limits.fetch("peak_rss_bytes")}" if peak_rss > limits.fetch("peak_rss_bytes")
+      violations << "peak benchmark disk #{peak_disk} > #{limits.fetch("peak_benchmark_disk_bytes")}" if peak_disk > limits.fetch("peak_benchmark_disk_bytes")
+      violations << "free disk #{minimum_free_disk} < #{limits.fetch("min_free_disk_bytes")}" if minimum_free_disk < limits.fetch("min_free_disk_bytes")
+      return if violations.empty?
+
+      raise InvalidResult, "#{workload.fetch("name")} resource limit violation: #{violations.join(", ")}"
+    end
+
+    def selected_workloads
+      workloads = @manifest.fetch("profiles").fetch(@profile).fetch("workloads")
+      return workloads unless @workload_name
+
+      [workloads.find { |workload| workload.fetch("name") == @workload_name }].compact
+    end
+
     def write_and_validate!(result)
       schema = JSONSchemer.schema(JSON.parse(File.read(SCHEMA_PATH)))
       errors = schema.validate(result).to_a
-      raise Error, "result schema errors: #{JSON.pretty_generate(errors)}" unless errors.empty?
+      raise SchemaError, "result schema errors: #{JSON.pretty_generate(errors)}" unless errors.empty?
 
       FileUtils.mkdir_p(File.dirname(@output_path))
       File.write(@output_path, JSON.pretty_generate(result) << "\n")
@@ -372,7 +503,7 @@ module CiBench
   class CLI
     def self.start(arguments)
       new(arguments).start
-    rescue OptionParser::ParseError, KeyError, Error => error
+    rescue OptionParser::ParseError, KeyError, Error, Fixtures::VerificationError => error
       warn "error: #{error.message}"
       exit 1
     end
@@ -382,20 +513,31 @@ module CiBench
       @manifest = YAML.safe_load(File.read(MANIFEST_PATH))
       @profile = "smoke"
       @output_path = nil
+      @workload_name = nil
     end
 
     def start
       command = @arguments.shift
       parse_options!
       ensure_profile!
+      ensure_workload!
 
       case command
       when "doctor"
         Doctor.new(@manifest, @profile).check!
+      when "fixtures"
+        path = File.join(ROOT, "benchmark/fixtures/checksums.json")
+        fixtures = Fixtures.verify_manifest!(path)
+        puts "verified #{fixtures.fetch("fixtures").length} deterministic fixtures"
       when "run"
-        Runner.new(@manifest, @profile, @output_path || default_output_path).run!
+        Runner.new(
+          @manifest,
+          @profile,
+          @output_path || default_output_path,
+          workload_name: @workload_name
+        ).run!
       else
-        raise Error, "usage: bin/bench <doctor|run> [--profile PROFILE] [--output PATH]"
+        raise Error, "usage: bin/bench <doctor|fixtures|run> [--profile PROFILE] [--output PATH]"
       end
     end
 
@@ -404,6 +546,7 @@ module CiBench
     def parse_options!
       OptionParser.new do |options|
         options.on("--profile PROFILE") { |profile| @profile = profile }
+        options.on("--workload NAME") { |name| @workload_name = name }
         options.on("--output PATH") { |path| @output_path = File.expand_path(path, ROOT) }
       end.parse!(@arguments)
       raise Error, "unexpected arguments: #{@arguments.join(" ")}" unless @arguments.empty?
@@ -415,9 +558,19 @@ module CiBench
       raise Error, "unknown profile: #{@profile}"
     end
 
+    def ensure_workload!
+      return unless @workload_name
+
+      names = @manifest.fetch("profiles").fetch(@profile).fetch("workloads").map { |workload| workload.fetch("name") }
+      return if names.include?(@workload_name)
+
+      raise Error, "unknown workload for #{@profile}: #{@workload_name}"
+    end
+
     def default_output_path
       timestamp = Time.now.utc.strftime("%Y%m%dT%H%M%S")
-      File.join(ROOT, "results/#{timestamp}-local-#{@profile}.json")
+      suffix = [@profile, @workload_name].compact.join("-")
+      File.join(ROOT, "results/#{timestamp}-local-#{suffix}.json")
     end
   end
 end

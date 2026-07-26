@@ -34,6 +34,8 @@ class BenchmarkContractTest < ActiveSupport::TestCase
       "run_id" => "de305d54-75b4-431b-adb2-eb6b9e546014",
       "commit_sha" => "0" * 40,
       "git_dirty" => false,
+      "partial" => false,
+      "scored" => false,
       "target" => "local",
       "profile" => "smoke",
       "scenario" => "baseline",
@@ -75,6 +77,14 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     assert_includes stderr, "resource sampling failed"
   end
 
+  test "CPU time parsing is portable across ps formats" do
+    sampler = CiBench::Sampler.new("cpu-test")
+
+    assert_in_delta 12.34, sampler.send(:parse_cpu_time, "0:12.34")
+    assert_in_delta 3_723, sampler.send(:parse_cpu_time, "01:02:03")
+    assert_in_delta 93_784.5, sampler.send(:parse_cpu_time, "1-02:03:04.5")
+  end
+
   test "mismatched expected verification is invalid" do
     manifest = YAML.safe_load_file(MANIFEST_PATH)
     manifest["profiles"]["smoke"]["expected_verification_digest"] = "0" * 64
@@ -82,5 +92,47 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     runner.instance_variable_set(:@outputs, { "database" => { "count" => 1 } })
 
     assert_raises(CiBench::InvalidResult) { runner.send(:verify_expected_digest!) }
+  end
+
+  test "verification digests are canonical and reject floats" do
+    manifest = YAML.safe_load_file(MANIFEST_PATH)
+    runner = CiBench::Runner.new(manifest, "smoke", Rails.root.join("tmp/result.json"))
+
+    first = runner.send(:verification_digest, { "b" => 2, "a" => { "d" => 4, "c" => 3 } })
+    second = runner.send(:verification_digest, { "a" => { "c" => 3, "d" => 4 }, "b" => 2 })
+
+    assert_equal first, second
+    assert_raises(CiBench::InvalidResult) do
+      runner.send(:verification_digest, { "duration" => 1.5 })
+    end
+  end
+
+  test "fixture generator matches the checked-in checksum manifest" do
+    manifest = CiBench::Fixtures.verify_manifest!(
+      Rails.root.join("benchmark/fixtures/checksums.json")
+    )
+
+    benchmark_manifest = YAML.safe_load_file(MANIFEST_PATH)
+
+    assert_equal benchmark_manifest.fetch("seed"), manifest.fetch("seed")
+    assert_equal %w[binary-1mib text-1mib],
+      manifest.fetch("fixtures").map { |fixture| fixture.fetch("name") }
+  end
+
+  test "resource limits reject a workload that exceeds its declared peak" do
+    manifest = YAML.safe_load_file(MANIFEST_PATH)
+    runner = CiBench::Runner.new(manifest, "smoke", Rails.root.join("tmp/result.json"))
+    workload = manifest.dig("profiles", "smoke", "workloads").first
+
+    error = assert_raises(CiBench::InvalidResult) do
+      runner.send(
+        :validate_limits!,
+        workload,
+        [],
+        { "peak_rss_bytes" => workload.dig("limits", "peak_rss_bytes") + 1 }
+      )
+    end
+
+    assert_includes error.message, "peak RSS"
   end
 end

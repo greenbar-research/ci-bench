@@ -1,4 +1,3 @@
-require "digest"
 require "json"
 
 output_path = ENV.fetch("BENCH_OUTPUT")
@@ -32,6 +31,7 @@ summary = {
   failed_count: Build.where(state: "failed").count,
   duration_ms: Build.sum(:duration_ms)
 }
-summary[:digest] = Digest::SHA256.hexdigest(JSON.generate(summary))
-
-File.write(output_path, JSON.generate(summary) << "\n")
+File.write(
+  output_path,
+  JSON.generate("verification" => summary, "telemetry" => {}) << "\n"
+)

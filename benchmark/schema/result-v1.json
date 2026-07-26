@@ -10,6 +10,8 @@
     "run_id",
     "commit_sha",
     "git_dirty",
+    "partial",
+    "scored",
     "target",
     "profile",
     "scenario",
@@ -27,6 +29,8 @@
     "run_id": { "type": "string", "format": "uuid" },
     "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "git_dirty": { "type": "boolean" },
+    "partial": { "type": "boolean" },
+    "scored": { "type": "boolean" },
     "target": { "type": "string", "minLength": 1 },
     "profile": { "type": "string", "minLength": 1 },
     "scenario": { "type": "string", "minLength": 1 },
@@ -115,12 +119,13 @@
     "workload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "status", "duration_ms", "verification"],
+      "required": ["name", "status", "duration_ms", "verification", "telemetry"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "status": { "enum": ["passed", "failed"] },
         "duration_ms": { "type": "integer", "minimum": 0 },
         "verification": { "type": "object" },
+        "telemetry": { "type": "object" },
         "error": { "type": "string", "minLength": 1 }
       }
     },
