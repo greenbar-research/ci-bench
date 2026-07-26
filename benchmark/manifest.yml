@@ -18,7 +18,7 @@ reference_runner:
 profiles:
   validation:
     scored: false
-    expected_verification_digest: 30c1e519e5c0de35c825390a34f2601dbfd525c02f644c7fb34620381b3f9155
+    expected_verification_digest: 93923fa67e0771f50b76d15c6b3fc9d7c283d993a7fd085516911c8ddef7d3c8
     minimum_runner:
       cpu_count: 2
       memory_bytes: 4294967296
@@ -77,6 +77,23 @@ profiles:
         command:
           - ruby
           - benchmark/harness/workloads/memory_import.rb
+      - name: cpu-assets
+        timeout_seconds: 120
+        parameters:
+          worker_count: 4
+          iterations_per_worker: 10
+          payload_bytes: 1048576
+          records_per_iteration: 5000
+          renders_per_iteration: 500
+        expected_verification_digest: 09740e3a542399ba6b100bd44509a2658433516e3ad6f99f64e6bb9b5250a7b4
+        limits:
+          peak_rss_bytes: 1073741824
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/cpu_assets.rb
   smoke:
     scored: false
     expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d
