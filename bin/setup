@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+bundle check >/dev/null 2>&1 || bundle install
+npm ci
+if [[ "$(uname -s)" == "Linux" ]]; then
+  npx playwright install --with-deps chromium
+else
+  npx playwright install chromium
+fi
+bin/ci/services
+RAILS_ENV=test bin/rails db:prepare
+
+echo "ci-bench is ready; run: bin/bench run --profile smoke"

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+port="${BENCH_PORT:-3100}"
+log_path="tmp/bench/rails-server.log"
+mkdir -p "$(dirname "$log_path")"
+
+if curl --fail --silent "http://127.0.0.1:${port}/up" >/dev/null 2>&1; then
+  echo "port ${port} already serves a healthy process; refusing to use a stale server" >&2
+  exit 1
+fi
+
+RAILS_ENV=test bin/rails server --binding 127.0.0.1 --port "$port" >"$log_path" 2>&1 &
+server_pid=$!
+
+cleanup() {
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+for _ in $(seq 1 240); do
+  if curl --fail --silent "http://127.0.0.1:${port}/up" >/dev/null; then
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "Rails exited before becoming healthy; see ${log_path}" >&2
+      exit 1
+    fi
+    BENCH_BASE_URL="http://127.0.0.1:${port}" npm run test:browser
+    exit 0
+  fi
+  sleep 0.25
+done
+
+echo "Rails did not become healthy; see ${log_path}" >&2
+exit 1

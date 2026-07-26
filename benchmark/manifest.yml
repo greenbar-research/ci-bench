@@ -1,0 +1,38 @@
+schema_version: 1
+benchmark_version: ci-bench-v1
+
+toolchain:
+  ruby: 3.4.10
+  rails: 8.1.3
+  node: 24.18.0
+  playwright: 1.62.0
+  postgres: "17.5"
+  redis: 8.0.3
+
+reference_runner:
+  cpu_count: 4
+  memory_bytes: 17179869184
+  disk_available_bytes: 15032385536
+
+profiles:
+  smoke:
+    scored: false
+    timeout_seconds: 120
+    expected_verification_digest: 949d278b75f99a1f946525f568d478c36ea98bea91bdc61bfa360a321bf3ad64
+    minimum_runner:
+      cpu_count: 2
+      memory_bytes: 4294967296
+      disk_available_bytes: 2147483648
+    workloads:
+      - name: database
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/database.rb
+      - name: file-io
+        command:
+          - ruby
+          - benchmark/harness/workloads/file_io.rb
+      - name: browser
+        command:
+          - bin/ci/browser

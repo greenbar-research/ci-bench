@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: active
 last_reviewed: 2026-07-26
 ---
 
@@ -341,9 +341,28 @@ Generated fixtures must contain no production or personal data. Logs and result
 artifacts must be scanned for environment variables and tokens before public
 publication.
 
+## Current state
+
+Slice 1 is implemented locally on `lox/initial-benchmark`. The repository now
+contains the pinned Rails application and toolchain, ephemeral PostgreSQL and
+Redis services, a manifest-driven smoke harness, resource sampling, a v1 result
+schema, and deterministic database, file-I/O, and Playwright browser workloads.
+
+`bin/bench doctor --profile smoke` passes on the development host. Repeated
+smoke runs complete in under ten seconds and produce the pinned verification
+digest
+`949d278b75f99a1f946525f568d478c36ea98bea91bdc61bfa360a321bf3ad64`.
+The smoke profile records dirty-tree provenance and remains explicitly
+unscored.
+
+Before Slice 2 calibration, CPU sampling must move from platform-specific
+`ps %cpu` values to per-interval process CPU-time deltas. The current values are
+useful smoke telemetry, but Linux and macOS calculate `%cpu` differently and
+the samples are not comparable.
+
 ## Delivery strategy
 
-### Slice 1: Contract and smoke workload
+### Slice 1: Contract and smoke workload (implemented)
 
 Create the Rails application, pinned toolchain, Docker Compose services,
 benchmark manifest, result schema, resource sampler, and `bin/bench` entry

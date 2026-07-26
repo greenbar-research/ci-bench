@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ci-bench.dev/schema/result-v1.json",
+  "title": "ci-bench result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "benchmark_version",
+    "run_id",
+    "commit_sha",
+    "git_dirty",
+    "target",
+    "profile",
+    "scenario",
+    "status",
+    "runner",
+    "timeline",
+    "workloads",
+    "caches",
+    "resources",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "benchmark_version": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "format": "uuid" },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "git_dirty": { "type": "boolean" },
+    "target": { "type": "string", "minLength": 1 },
+    "profile": { "type": "string", "minLength": 1 },
+    "scenario": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["passed", "failed", "invalid"] },
+    "error": { "type": "string", "minLength": 1 },
+    "runner": {
+      "oneOf": [
+        { "$ref": "#/$defs/runner" },
+        { "type": "null" }
+      ]
+    },
+    "timeline": { "$ref": "#/$defs/timeline" },
+    "workloads": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/workload" }
+    },
+    "caches": { "type": "array", "items": { "type": "object" } },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["samples"],
+      "properties": {
+        "samples": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/resource_sample" }
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "outputs"],
+      "properties": {
+        "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "outputs": { "type": "object" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "passed" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "runner": { "$ref": "#/$defs/runner" },
+          "workloads": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture",
+        "cpu_count",
+        "disk_available_bytes",
+        "memory_bytes",
+        "os",
+        "ruby_version",
+        "node_version"
+      ],
+      "properties": {
+        "architecture": { "type": "string", "minLength": 1 },
+        "cpu_count": { "type": "integer", "minimum": 1 },
+        "disk_available_bytes": { "type": "integer", "minimum": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "os": { "type": "string", "minLength": 1 },
+        "ruby_version": { "type": "string", "minLength": 1 },
+        "node_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "timeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "completed_at", "duration_ms"],
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "duration_ms", "verification"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["passed", "failed"] },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "verification": { "type": "object" },
+        "error": { "type": "string", "minLength": 1 }
+      }
+    },
+    "resource_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "elapsed_ms",
+        "workload",
+        "cpu_percent",
+        "rss_bytes",
+        "disk_used_bytes",
+        "disk_available_bytes"
+      ],
+      "properties": {
+        "elapsed_ms": { "type": "integer", "minimum": 0 },
+        "workload": { "type": "string", "minLength": 1 },
+        "cpu_percent": { "type": "number", "minimum": 0 },
+        "rss_bytes": { "type": "integer", "minimum": 0 },
+        "disk_used_bytes": { "type": "integer", "minimum": 0 },
+        "disk_available_bytes": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
