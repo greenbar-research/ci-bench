@@ -18,7 +18,7 @@ reference_runner:
 profiles:
   validation:
     scored: false
-    expected_verification_digest: 93923fa67e0771f50b76d15c6b3fc9d7c283d993a7fd085516911c8ddef7d3c8
+    expected_verification_digest: ca7db7bbc28a143f5b98bc104704c8146bc4fb82e0aa77decb18613e11091a08
     minimum_runner:
       cpu_count: 2
       memory_bytes: 4294967296
@@ -94,6 +94,19 @@ profiles:
           - bin/rails
           - runner
           - benchmark/harness/workloads/cpu_assets.rb
+      - name: docker
+        timeout_seconds: 900
+        parameters:
+          health_timeout_seconds: 60
+          minimum_layer_count: 8
+          rails_version: 8.1.3
+        expected_verification_digest: 94ac9031f1a6c13dfc073535997bde92f6a91802b6679083e1d3d6d59ff66090
+        limits:
+          peak_benchmark_disk_bytes: 4294967296
+          min_free_disk_bytes: 2147483648
+        command:
+          - ruby
+          - benchmark/harness/workloads/docker.rb
   smoke:
     scored: false
     expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d

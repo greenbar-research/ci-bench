@@ -14,7 +14,7 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     assert_equal "ci-bench-v1", manifest.fetch("benchmark_version")
     assert_equal %w[database file-io browser],
       manifest.dig("profiles", "smoke", "workloads").map { |workload| workload.fetch("name") }
-    assert_equal %w[rails-postgres disk-active-storage memory-import cpu-assets],
+    assert_equal %w[rails-postgres disk-active-storage memory-import cpu-assets docker],
       manifest.dig("profiles", "validation", "workloads").map { |workload| workload.fetch("name") }
     validation = manifest.dig("profiles", "validation")
     assert_match(/\A[0-9a-f]{64}\z/, validation.fetch("expected_verification_digest"))
@@ -26,6 +26,10 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     assert_operator ActiveRecord::Base.connection_pool.size,
       :>=,
       rails_postgres.dig("parameters", "concurrency_threads") + 1
+    docker = validation.fetch("workloads").find { |workload| workload.fetch("name") == "docker" }
+    assert_operator docker.dig("parameters", "minimum_layer_count"), :>, 0
+    assert_equal manifest.dig("toolchain", "rails"), docker.dig("parameters", "rails_version")
+    assert_not docker.fetch("limits").key?("peak_rss_bytes")
     assert_equal RUBY_VERSION, manifest.dig("toolchain", "ruby")
     assert_match(/\A[0-9a-f]{64}\z/, manifest.dig("profiles", "smoke", "expected_verification_digest"))
   end
@@ -146,5 +150,30 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     end
 
     assert_includes error.message, "peak RSS"
+  end
+
+  test "Docker-owned bytes fail the workload disk limit closed" do
+    manifest = YAML.safe_load_file(MANIFEST_PATH)
+    runner = CiBench::Runner.new(manifest, "validation", Rails.root.join("tmp/result.json"))
+    workload = manifest.dig("profiles", "validation", "workloads")
+      .find { |candidate| candidate.fetch("name") == "docker" }
+
+    [{}, { "peak_benchmark_disk_bytes" => -1 }, { "peak_benchmark_disk_bytes" => "1" }].each do |telemetry|
+      error = assert_raises(CiBench::InvalidResult) do
+        runner.send(:validate_limits!, workload, [], telemetry)
+      end
+      assert_includes error.message, "non-negative integer"
+    end
+
+    error = assert_raises(CiBench::InvalidResult) do
+      runner.send(
+        :validate_limits!,
+        workload,
+        [],
+        { "peak_benchmark_disk_bytes" => workload.dig("limits", "peak_benchmark_disk_bytes") + 1 }
+      )
+    end
+
+    assert_includes error.message, "peak benchmark disk"
   end
 end

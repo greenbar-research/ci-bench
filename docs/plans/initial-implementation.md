@@ -367,9 +367,9 @@ limits, expected digests, partial workload runs, verification/telemetry
 separation, canonical digesting, scoped disk cleanup, and deterministic fixture
 checks are implemented. The Rails domain now includes users and sessions,
 project ownership, builds and test cases, artifact metadata and Active Storage,
-audit events, and deterministic build-report filtering. The next work is the
-six full workload groups at validation scale. The Rails/PostgreSQL group is the
-first implemented mechanism: it streams deterministic relational fixtures,
+audit events, and deterministic build-report filtering. Five of the six full
+workload groups are implemented at validation scale. The Rails/PostgreSQL group
+streams deterministic relational fixtures,
 executes ORM transactions, repeats aggregate reports, and applies atomic
 concurrent updates. Its validation profile is pinned and unscored; calibration
 scale remains pending. PostgreSQL uses a 1.5 GiB tmpfs cap, and each workload
@@ -384,7 +384,11 @@ group now streams deterministic CSV and NDJSON imports separately from
 incompressible retained allocations, so row volume and the eventual 5–7 GiB
 high-water mark can be calibrated independently. The CPU group now compiles the
 real Propshaft asset graph and runs deterministic compression, hashing, ERB
-rendering, and JSON serialization across four worker processes.
+rendering, and JSON serialization across four worker processes. The Docker
+group builds the production application image with BuildKit, verifies its
+layers and runtime metadata, boots it against a scoped PostgreSQL database,
+checks its health and deterministic Rails output, accounts for exact daemon
+disk bytes, and removes scoped containers and images on success or failure.
 
 ## Delivery strategy
 

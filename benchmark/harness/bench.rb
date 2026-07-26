@@ -368,17 +368,40 @@ module CiBench
       output_path = File.join(ROOT, "tmp/bench/#{name}.json")
       FileUtils.rm_f(output_path)
       sampler = Sampler.new(name)
-      duration_ms = sampler.run(
-        workload.fetch("command"),
-        env: {
-          "RAILS_ENV" => "test",
-          "BENCH_OUTPUT" => output_path,
-          "BENCH_PARAMS" => JSON.generate(workload.fetch("parameters")),
-          "BENCH_PROFILE" => @profile,
-          "BENCH_SEED" => @manifest.fetch("seed").to_s
-        },
-        timeout_seconds: workload.fetch("timeout_seconds")
-      )
+      scope = "#{Process.pid}-#{SecureRandom.hex(6)}" if name == "docker"
+      environment = {
+        "RAILS_ENV" => "test",
+        "BENCH_OUTPUT" => output_path,
+        "BENCH_PARAMS" => JSON.generate(workload.fetch("parameters")),
+        "BENCH_PROFILE" => @profile,
+        "BENCH_SEED" => @manifest.fetch("seed").to_s
+      }
+      environment["BENCH_SCOPE"] = scope if scope
+      run_error = nil
+      cleanup_error = nil
+      begin
+        duration_ms = sampler.run(
+          workload.fetch("command"),
+          env: environment,
+          timeout_seconds: workload.fetch("timeout_seconds")
+        )
+      rescue => error
+        run_error = error
+      ensure
+        if scope
+          begin
+            cleanup_docker_workload!(scope)
+          rescue => error
+            cleanup_error = error
+          end
+        end
+      end
+      if cleanup_error
+        messages = [run_error&.message, cleanup_error.message].compact
+        raise Error, messages.join("\nDocker cleanup failed: ")
+      end
+      raise run_error if run_error
+
       payload = JSON.parse(File.read(output_path))
       unless payload.keys.sort == %w[telemetry verification] &&
           payload.fetch("verification").is_a?(Hash) &&
@@ -482,17 +505,70 @@ module CiBench
 
     def validate_limits!(workload, samples, telemetry)
       limits = workload.fetch("limits")
+      if workload.fetch("name") == "docker"
+        docker_disk = telemetry["peak_benchmark_disk_bytes"]
+        unless docker_disk.is_a?(Integer) && docker_disk >= 0
+          raise InvalidResult, "docker telemetry must contain non-negative integer peak_benchmark_disk_bytes"
+        end
+      end
       peak_rss = ([telemetry["peak_rss_bytes"]] + samples.map { |sample| sample.fetch("rss_bytes") }).compact.max || 0
       peak_disk = ([telemetry["peak_benchmark_disk_bytes"]] + samples.map { |sample| sample.fetch("disk_used_bytes") }).compact.max || 0
       minimum_free_disk = samples.map { |sample| sample.fetch("disk_available_bytes") }.min || Host.disk_available_bytes
 
       violations = []
-      violations << "peak RSS #{peak_rss} > #{limits.fetch("peak_rss_bytes")}" if peak_rss > limits.fetch("peak_rss_bytes")
+      if limits.key?("peak_rss_bytes") && peak_rss > limits.fetch("peak_rss_bytes")
+        violations << "peak RSS #{peak_rss} > #{limits.fetch("peak_rss_bytes")}"
+      end
       violations << "peak benchmark disk #{peak_disk} > #{limits.fetch("peak_benchmark_disk_bytes")}" if peak_disk > limits.fetch("peak_benchmark_disk_bytes")
       violations << "free disk #{minimum_free_disk} < #{limits.fetch("min_free_disk_bytes")}" if minimum_free_disk < limits.fetch("min_free_disk_bytes")
       return if violations.empty?
 
       raise InvalidResult, "#{workload.fetch("name")} resource limit violation: #{violations.join(", ")}"
+    end
+
+    def cleanup_docker_workload!(scope)
+      label = "ci-bench.scope=#{scope}"
+      capture = lambda do |*command|
+        Open3.capture3(*command, chdir: ROOT)
+      end
+      capture_bang = lambda do |*command|
+        stdout, stderr, status = capture.call(*command)
+        return stdout if status.success?
+
+        raise Error, "#{command.join(" ")} failed: #{stdout}#{stderr}"
+      end
+
+      3.times do |attempt|
+        containers = capture_bang.call(
+          "docker", "container", "ls", "--all", "--quiet", "--filter", "label=#{label}"
+        ).lines.map(&:strip).reject(&:empty?)
+        capture_bang.call("docker", "container", "rm", "--force", *containers) if containers.any?
+
+        images = capture_bang.call(
+          "docker", "image", "ls", "--quiet", "--filter", "label=#{label}"
+        ).lines.map(&:strip).reject(&:empty?).uniq
+        capture_bang.call("docker", "image", "rm", "--force", *images) if images.any?
+        sleep 0.5 unless attempt == 2
+      end
+
+      postgres_id = capture_bang.call("docker", "compose", "ps", "--quiet", "postgres").strip
+      raise Error, "Docker cleanup could not find Compose PostgreSQL" if postgres_id.empty?
+
+      database = "ci_bench_docker_#{scope.tr("-", "_")}"
+      capture_bang.call(
+        "docker", "exec", postgres_id,
+        "dropdb", "--if-exists", "--force", "--username", "ci_bench", database
+      )
+
+      remaining_containers = capture_bang.call(
+        "docker", "container", "ls", "--all", "--quiet", "--filter", "label=#{label}"
+      )
+      remaining_images = capture_bang.call(
+        "docker", "image", "ls", "--quiet", "--filter", "label=#{label}"
+      )
+      return if remaining_containers.strip.empty? && remaining_images.strip.empty?
+
+      raise Error, "Docker resources remain for scope #{scope}"
     end
 
     def selected_workloads
