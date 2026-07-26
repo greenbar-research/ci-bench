@@ -14,6 +14,17 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     assert_equal "ci-bench-v1", manifest.fetch("benchmark_version")
     assert_equal %w[database file-io browser],
       manifest.dig("profiles", "smoke", "workloads").map { |workload| workload.fetch("name") }
+    assert_equal %w[rails-postgres],
+      manifest.dig("profiles", "validation", "workloads").map { |workload| workload.fetch("name") }
+    validation = manifest.dig("profiles", "validation")
+    assert_match(/\A[0-9a-f]{64}\z/, validation.fetch("expected_verification_digest"))
+    validation.fetch("workloads").each do |workload|
+      assert_match(/\A[0-9a-f]{64}\z/, workload.fetch("expected_verification_digest"))
+      assert_operator workload.dig("parameters", "insert_batch_size"), :>, 0
+      assert_operator ActiveRecord::Base.connection_pool.size,
+        :>=,
+        workload.dig("parameters", "concurrency_threads") + 1
+    end
     assert_equal RUBY_VERSION, manifest.dig("toolchain", "ruby")
     assert_match(/\A[0-9a-f]{64}\z/, manifest.dig("profiles", "smoke", "expected_verification_digest"))
   end

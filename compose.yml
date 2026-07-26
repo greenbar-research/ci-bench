@@ -15,7 +15,7 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     tmpfs:
-      - /var/lib/postgresql/data
+      - /var/lib/postgresql/data:size=1536m
 
   redis:
     image: redis:8.0.3-alpine

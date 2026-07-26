@@ -28,5 +28,15 @@ services.
 `bin/bench fixtures` regenerates the small contract fixtures in memory and
 checks their digests against the checked-in checksum manifest.
 
+Slice 2 workload mechanisms land first in the unscored validation profile. Run
+the current Rails/PostgreSQL group independently with:
+
+```console
+bin/bench run --profile validation --workload rails-postgres
+```
+
+Validation-scale parameters stay small enough for local iteration; the same
+manifest inputs will be increased for the calibrated full profile.
+
 See [the implementation plan](docs/plans/initial-implementation.md) for the
 benchmark contract and remaining delivery slices.

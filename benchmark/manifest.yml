@@ -16,6 +16,36 @@ reference_runner:
   disk_available_bytes: 15032385536
 
 profiles:
+  validation:
+    scored: false
+    expected_verification_digest: 44de85abb9a087c436465cb6befac3706229cc4c8d3afbd173f873459d801f23
+    minimum_runner:
+      cpu_count: 2
+      memory_bytes: 4294967296
+      disk_available_bytes: 2147483648
+    workloads:
+      - name: rails-postgres
+        timeout_seconds: 120
+        parameters:
+          user_count: 4
+          project_count: 24
+          builds_per_project: 8
+          test_cases_per_build: 12
+          insert_batch_size: 500
+          orm_write_count: 48
+          concurrency_threads: 4
+          concurrent_updates_per_thread: 25
+          contention_build_count: 8
+          report_iterations: 5
+        expected_verification_digest: 3916668e959fbfcf35d26c138a9f5cca0d9d365bcbf62d00c68a6a446ef97a08
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 2147483648
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/rails_postgres.rb
   smoke:
     scored: false
     expected_verification_digest: 4addb8bd1d607fc7bd4416f69a267077ed2ef65aad278df3f39583fb9ca2185d

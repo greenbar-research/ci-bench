@@ -368,7 +368,12 @@ separation, canonical digesting, scoped disk cleanup, and deterministic fixture
 checks are implemented. The Rails domain now includes users and sessions,
 project ownership, builds and test cases, artifact metadata and Active Storage,
 audit events, and deterministic build-report filtering. The next work is the
-six full workload groups at validation scale.
+six full workload groups at validation scale. The Rails/PostgreSQL group is the
+first implemented mechanism: it streams deterministic relational fixtures,
+executes ORM transactions, repeats aggregate reports, and applies atomic
+concurrent updates. Its validation profile is pinned and unscored; calibration
+scale remains pending. PostgreSQL uses a 1.5 GiB tmpfs cap, and each workload
+reports its database bytes into the benchmark disk limit.
 
 ## Delivery strategy
 
