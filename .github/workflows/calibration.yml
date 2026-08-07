@@ -1,0 +1,92 @@
+name: Unscored serial calibration
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit SHA to calibrate (defaults to the workflow commit)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unscored-serial-calibration
+  cancel-in-progress: false
+
+jobs:
+  full-serial:
+    name: Full serial (unscored)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.10
+          bundler-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: npm
+
+      - name: Install pinned ImageMagick
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=7.1.2-29
+          archive="ImageMagick-${version}-gcc-x86_64.AppImage"
+          curl --fail --location --silent --show-error \
+            "https://github.com/ImageMagick/ImageMagick/releases/download/${version}/${archive}" \
+            --output "/tmp/${archive}"
+          echo "d43978debd8c25b12c26e368f93de827a8dc45fd13396126ae9b758cd3570485  /tmp/${archive}" \
+            | sha256sum --check
+          chmod +x "/tmp/${archive}"
+          mkdir /tmp/imagemagick
+          cd /tmp/imagemagick
+          "/tmp/${archive}" --appimage-extract >/dev/null
+          sudo mv squashfs-root /opt/ci-bench-imagemagick
+          sudo ln --symbolic /opt/ci-bench-imagemagick/AppRun /usr/local/bin/magick
+          magick -version
+
+      - name: Install application and browser dependencies
+        run: bin/setup
+
+      - name: Verify reference runner and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          test "$(nproc)" -eq 4
+          source /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 24.04
+          uname -a
+          lscpu
+          free -h
+          df -h .
+          bin/bench doctor --profile full
+
+      - name: Run unscored full serial profile
+        run: bin/bench run --profile full --output tmp/calibration-result.json
+
+      - name: Upload raw calibration evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            tmp/calibration-result.json
+            tmp/bench/**/*.json
+            tmp/bench/*.log
