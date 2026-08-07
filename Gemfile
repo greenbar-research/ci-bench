@@ -10,6 +10,8 @@ gem "pg", "~> 1.1"
 gem "puma", ">= 5.0"
 # Validate raw benchmark records against the published JSON Schema.
 gem "json_schemer", "~> 2.4"
+# Ruby 3.4 no longer provides CSV as a default gem.
+gem "csv", "3.3.6"
 
 # Use Active Model has_secure_password [https://guides.rubyonrails.org/active_model_basics.html#securepassword]
 gem "bcrypt", "~> 3.1"
