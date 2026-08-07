@@ -10,6 +10,7 @@
 /storage/*
 /test-results/
 /tmp/*
+/vendor/bundle
 
 !/log/.keep
 !/storage/.keep
