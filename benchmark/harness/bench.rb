@@ -374,7 +374,8 @@ module CiBench
         "BENCH_OUTPUT" => output_path,
         "BENCH_PARAMS" => JSON.generate(workload.fetch("parameters")),
         "BENCH_PROFILE" => @profile,
-        "BENCH_SEED" => @manifest.fetch("seed").to_s
+        "BENCH_SEED" => @manifest.fetch("seed").to_s,
+        "BENCH_TIMEOUT_SECONDS" => workload.fetch("timeout_seconds").to_s
       }
       environment["BENCH_SCOPE"] = scope if scope
       run_error = nil

@@ -16,6 +16,110 @@ reference_runner:
   disk_available_bytes: 15032385536
 
 profiles:
+  full:
+    scored: false
+    expected_verification_digest: fd23ccae06ea1a57afc08164e111b2547838b7f21a2b97ebead1b70a09013cf2
+    minimum_runner:
+      cpu_count: 4
+      memory_bytes: 16106127360
+      disk_available_bytes: 15032385536
+    workloads:
+      - name: rails-postgres
+        timeout_seconds: 900
+        parameters:
+          user_count: 100
+          project_count: 300
+          builds_per_project: 200
+          test_cases_per_build: 12
+          insert_batch_size: 2000
+          orm_write_count: 50000
+          concurrency_threads: 4
+          concurrent_updates_per_thread: 7500
+          contention_build_count: 256
+          report_iterations: 50
+        expected_verification_digest: 365c6f034a606d906796b0c357c6df74ac253a91040e20491a1ff01b40a483c5
+        limits:
+          peak_rss_bytes: 3221225472
+          peak_benchmark_disk_bytes: 1610612736
+          min_free_disk_bytes: 4294967296
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/rails_postgres.rb
+      - name: disk-active-storage
+        timeout_seconds: 600
+        parameters:
+          artifact_count: 20
+          bytes_per_artifact: 67108864
+          image_dimension: 4096
+          transformed_dimension: 1024
+        expected_verification_digest: 790bff71c4543feb506f733746c15d789c5962b8c8a72a3a26df9def2071218c
+        limits:
+          peak_rss_bytes: 3221225472
+          peak_benchmark_disk_bytes: 8589934592
+          min_free_disk_bytes: 4294967296
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/disk_active_storage.rb
+      - name: memory-import
+        timeout_seconds: 600
+        parameters:
+          row_count: 6000000
+          project_count: 2000
+          retained_bytes: 6442450944
+          allocation_chunk_bytes: 16777216
+        expected_verification_digest: bc2d28904f13a7e18cbcd18060833c47411442212bc628e4f22ae2130776803d
+        limits:
+          peak_rss_bytes: 7516192768
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 4294967296
+        command:
+          - ruby
+          - benchmark/harness/workloads/memory_import.rb
+      - name: cpu-assets
+        timeout_seconds: 600
+        parameters:
+          worker_count: 4
+          iterations_per_worker: 750
+          payload_bytes: 1048576
+          records_per_iteration: 5000
+          renders_per_iteration: 500
+        expected_verification_digest: 69bdf7fc59bf4856e4e6036b21ea281d541e77394efab2b12601e73b98248581
+        limits:
+          peak_rss_bytes: 2147483648
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 4294967296
+        command:
+          - bin/rails
+          - runner
+          - benchmark/harness/workloads/cpu_assets.rb
+      - name: docker
+        timeout_seconds: 900
+        parameters:
+          health_timeout_seconds: 60
+          minimum_layer_count: 8
+          rails_version: 8.1.3
+        expected_verification_digest: 94ac9031f1a6c13dfc073535997bde92f6a91802b6679083e1d3d6d59ff66090
+        limits:
+          peak_benchmark_disk_bytes: 4294967296
+          min_free_disk_bytes: 4294967296
+        command:
+          - ruby
+          - benchmark/harness/workloads/docker.rb
+      - name: browser-system
+        timeout_seconds: 600
+        parameters:
+          artifact_bytes: 1048576
+          flow_iterations: 120
+        expected_verification_digest: bba4ba956cd735c201ed46bfb2c76a2caed6555045319c63672f4425221d53a1
+        limits:
+          peak_rss_bytes: 3221225472
+          peak_benchmark_disk_bytes: 1073741824
+          min_free_disk_bytes: 4294967296
+        command:
+          - bin/ci/browser
+          - full
   validation:
     scored: false
     expected_verification_digest: ed17bbe58a7e29a484d900f26a19d176de8c197b1de2b50df13b07cd73eb86db

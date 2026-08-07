@@ -40,8 +40,21 @@ bin/bench run --profile validation --workload memory-import
 bin/bench run --profile validation --workload cpu-assets
 ```
 
-Validation-scale parameters stay small enough for local iteration; the same
-manifest inputs will be increased for the calibrated full profile.
+Validation-scale parameters stay small enough for local iteration. The
+provisional full profile increases the same manifest inputs for scale testing
+before reference-runner calibration.
+
+The provisional full-scale profile exercises the declared resource envelope
+and is also unscored:
+
+```console
+bin/bench run --profile full
+```
+
+Its parameters and verification digests can be functionally checked on other
+machines, but timing calibration is authoritative only on x86-64 Ubuntu 24.04
+with 4 vCPU and 16 GB of memory. In particular, timings from larger development
+orbs must not be used to claim the 19–21 minute reference target.
 
 See [the implementation plan](docs/plans/initial-implementation.md) for the
 benchmark contract and remaining delivery slices.

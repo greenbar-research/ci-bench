@@ -8,7 +8,7 @@ class BenchmarkContractTest < ActiveSupport::TestCase
   MANIFEST_PATH = Rails.root.join("benchmark/manifest.yml")
   SCHEMA_PATH = Rails.root.join("benchmark/schema/result-v1.json")
 
-  test "manifest pins the validation and smoke profiles with the toolchain" do
+  test "manifest pins the full, validation, and smoke profiles with the toolchain" do
     manifest = YAML.safe_load_file(MANIFEST_PATH)
 
     assert_equal "ci-bench-v1", manifest.fetch("benchmark_version")
@@ -16,6 +16,8 @@ class BenchmarkContractTest < ActiveSupport::TestCase
       manifest.dig("profiles", "smoke", "workloads").map { |workload| workload.fetch("name") }
     assert_equal %w[rails-postgres disk-active-storage memory-import cpu-assets docker browser-system],
       manifest.dig("profiles", "validation", "workloads").map { |workload| workload.fetch("name") }
+    assert_equal %w[rails-postgres disk-active-storage memory-import cpu-assets docker browser-system],
+      manifest.dig("profiles", "full", "workloads").map { |workload| workload.fetch("name") }
     validation = manifest.dig("profiles", "validation")
     assert_match(/\A[0-9a-f]{64}\z/, validation.fetch("expected_verification_digest"))
     validation.fetch("workloads").each do |workload|
@@ -32,6 +34,22 @@ class BenchmarkContractTest < ActiveSupport::TestCase
     assert_not docker.fetch("limits").key?("peak_rss_bytes")
     assert_equal RUBY_VERSION, manifest.dig("toolchain", "ruby")
     assert_match(/\A[0-9a-f]{64}\z/, manifest.dig("profiles", "smoke", "expected_verification_digest"))
+
+    full = manifest.dig("profiles", "full")
+    assert_equal false, full.fetch("scored")
+    assert_match(/\A[0-9a-f]{64}\z/, full.fetch("expected_verification_digest"))
+    full.fetch("workloads").each do |workload|
+      assert_match(/\A[0-9a-f]{64}\z/, workload.fetch("expected_verification_digest"))
+    end
+    full_cpu = full.fetch("workloads").find { |workload| workload.fetch("name") == "cpu-assets" }
+    assert_equal 4, full_cpu.dig("parameters", "worker_count")
+    full_memory = full.fetch("workloads").find { |workload| workload.fetch("name") == "memory-import" }
+    assert_includes (5 * 1024**3)..(7 * 1024**3), full_memory.dig("parameters", "retained_bytes")
+    full_disk = full.fetch("workloads").find { |workload| workload.fetch("name") == "disk-active-storage" }
+    source_bytes = full_disk.dig("parameters", "artifact_count") *
+      full_disk.dig("parameters", "bytes_per_artifact")
+    assert_operator source_bytes, :<=, 3 * 1024**3 / 2
+    assert_operator source_bytes * 6, :<=, full_disk.dig("limits", "peak_benchmark_disk_bytes")
   end
 
   test "result schema rejects incomplete attempts" do

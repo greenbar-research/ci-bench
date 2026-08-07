@@ -1,6 +1,6 @@
 ---
 status: active
-last_reviewed: 2026-07-26
+last_reviewed: 2026-08-07
 ---
 
 # Initial ci-bench implementation
@@ -392,6 +392,17 @@ disk bytes, and removes scoped containers and images on success or failure. The
 browser system group drives authentication, project and build creation, test
 result filtering, report totals, artifact upload, and sign-out through
 Chromium, with generated inputs and verification digests kept deterministic.
+
+A provisional, explicitly unscored `full` profile now scales all six groups
+under the declared resource limits and pins the combined verification digest
+`fd23ccae06ea1a57afc08164e111b2547838b7f21a2b97ebead1b70a09013cf2`.
+Two combined executions reproduced the digest on an x86-64 Debian 12
+functional-validation orb with 8 vCPU and 16 GB declared memory. The repeated
+pinned run completed in about 13 minutes, but that timing is not reference
+calibration: only x86-64 Ubuntu 24.04 with 4 vCPU and 16 GB can establish the
+19–21 minute target. The next Slice 2 step is the temporary unscored GitHub
+Actions calibration workflow and five reference runs, adjusting useful-work
+parameters rather than resource limits.
 
 ## Delivery strategy
 

@@ -5,12 +5,15 @@ const { test, expect } = require("@playwright/test");
 test("exercises complete CI reporting flows", async ({ page }) => {
   const parameters = JSON.parse(process.env.BENCH_PARAMS || "{}");
   const seed = Number.parseInt(process.env.BENCH_SEED || "", 10);
+  const outerTimeoutSeconds = Number.parseInt(process.env.BENCH_TIMEOUT_SECONDS || "", 10);
   const iterations = parameters.flow_iterations;
   const artifactBytes = parameters.artifact_bytes;
   if (!Number.isInteger(seed) || !Number.isInteger(iterations) || iterations <= 0 ||
-      !Number.isInteger(artifactBytes) || artifactBytes <= 0) {
+      !Number.isInteger(artifactBytes) || artifactBytes <= 0 ||
+      !Number.isInteger(outerTimeoutSeconds) || outerTimeoutSeconds <= 0) {
     throw new Error("validation browser parameters must be positive integers");
   }
+  test.setTimeout(outerTimeoutSeconds * 900);
 
   const phaseDurationMs = {};
   const measure = async (name, action) => {
