@@ -62,12 +62,14 @@ docker_disk_bytes = lambda do
       "http://localhost/v1.41/system/df"
     )
   )
-  payload.fetch("BuildCache")
+  builder_bytes = payload.fetch("BuildCache").reject { |item| item.fetch("Shared") }.sum do |item|
+    non_negative_integer.call(item.fetch("Size"), "build cache Size")
+  end
   volume_bytes = payload.fetch("Volumes", []).sum do |volume|
     non_negative_integer.call(volume.fetch("UsageData").fetch("Size"), "volume Size")
   end
   non_negative_integer.call(payload.fetch("LayersSize"), "LayersSize") +
-    non_negative_integer.call(payload.fetch("BuilderSize"), "BuilderSize") +
+    builder_bytes +
     payload.fetch("Containers", []).sum do |item|
       # The Engine API omits SizeRw when the writable layer is exactly zero.
       non_negative_integer.call(item.fetch("SizeRw", 0), "container SizeRw")
