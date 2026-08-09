@@ -20,6 +20,8 @@ jobs:
     name: Full serial (unscored)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      BENCH_TARGET: github-actions
 
     steps:
       - name: Check out exact revision

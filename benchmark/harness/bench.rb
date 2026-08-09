@@ -449,7 +449,7 @@ module CiBench
         "git_dirty" => @git_dirty,
         "partial" => !@workload_name.nil?,
         "scored" => @workload_name.nil? && @manifest.fetch("profiles").fetch(@profile).fetch("scored"),
-        "target" => "local",
+        "target" => ENV.fetch("BENCH_TARGET", "local"),
         "profile" => @profile,
         "scenario" => @workload_name ? "workload:#{@workload_name}" : "baseline",
         "status" => status,
