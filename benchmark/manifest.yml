@@ -18,7 +18,7 @@ reference_runner:
 profiles:
   full:
     scored: false
-    expected_verification_digest: d3d7e89737e9345db341a18a338ad28beec0c17f7f8c5f437ce20776c25a0f8d
+    expected_verification_digest: 0913ad9613dc1ba3af44e71e05d2bfa49a2ac2f3a841dbbbaf7f9c064991bcd3
     minimum_runner:
       cpu_count: 4
       memory_bytes: 16106127360
@@ -36,8 +36,8 @@ profiles:
           concurrency_threads: 4
           concurrent_updates_per_thread: 7500
           contention_build_count: 256
-          report_iterations: 200000
-        expected_verification_digest: 244a9b6b8bdd1e0ba944b1995c3d1a82a33643ea8e8fafcab7ad4482a6018cdc
+          report_iterations: 300000
+        expected_verification_digest: 12b42a320f17e711e3804c990cbb827fb4f8b5bb8b21e73fc6390092ca915e97
         limits:
           peak_rss_bytes: 3221225472
           peak_benchmark_disk_bytes: 1610612736
