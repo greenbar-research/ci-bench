@@ -96,13 +96,14 @@ elsif circle
   workflow = circle["workflow"] || {}
   circle_jobs = circle["jobs"] || []
   c_job = circle_jobs.first || {}
-  terminal = %w[success failed error failing canceled unauthorized not_run].include?(workflow["status"])
+  terminal = %w[success failed error canceled unauthorized not_run].include?(workflow["status"])
   run = {
     "id" => pipeline["number"],
     "status" => terminal ? "completed" : workflow["status"],
     "conclusion" => workflow["status"],
     "head_sha" => pipeline.dig("vcs", "revision"),
-    "run_attempt" => circle_jobs.size == 1 && workflow["tag"] != "rerun" ? 1 : "retried",
+    # A rerun adds a workflow to the pipeline; a retried job adds a job.
+    "run_attempt" => circle_jobs.size == 1 && (circle["workflows"] || [workflow]).size == 1 ? 1 : "retried",
     "created_at" => pipeline["created_at"],
     "run_started_at" => workflow["created_at"],
     "updated_at" => workflow["stopped_at"],

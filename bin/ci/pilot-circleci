@@ -60,19 +60,44 @@ verify_pilot_tag() {
   fi
 }
 
-# cc URL [OUTPUT_FILE]: authenticated read-only GET to OUTPUT_FILE or stdout.
-# It succeeds only when curl exits 0 and the status is 2xx; transport
-# failures, 429, and 5xx are retried after Retry-After (10 s by default), and
-# every attempt passes through the shared 1 s limiter.
+# token_host URL: succeeds when URL is https on a host allowed to receive the
+# CircleCI token: circleci.com and CircleCI's artifact host, plus the host of
+# CI_BENCH_CIRCLECI_API when overridden for local tests. Presigned log URLs and
+# any other host never get the token.
+token_host() {
+  local url="$1" host test_host
+  host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$url")"
+  test_host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"${CI_BENCH_CIRCLECI_API:-}")"
+  if [[ -n "${CI_BENCH_CIRCLECI_API:-}" && "$host" == "$test_host" && "$url" == "${CI_BENCH_CIRCLECI_API%%/api/*}"* ]]; then return 0; fi
+  [[ "$url" == https://* ]] && [[ "$host" == circleci.com || "$host" == output.circle-artifacts.com ]]
+}
+
+# cc URL [OUTPUT_FILE]: read-only GET to OUTPUT_FILE or stdout. Redirects are
+# followed by hand, at most five hops, so the token goes only to allowed hosts
+# (token_host) and never to a redirect target elsewhere. It succeeds only when
+# curl exits 0 and the final status is 2xx; transport failures, 429, and 5xx
+# are retried after Retry-After (10 s by default). Every attempt and hop
+# passes through the shared 1 s limiter.
 cc() {
-  local url="$1" output="${2:-}" out headers code="" rc wait attempt
+  local url="$1" output="${2:-}" out headers code="" rc wait attempt hop target next
   : "${CIRCLECI_TOKEN:?CIRCLECI_TOKEN is not loaded}"
   out="$(mktemp)" headers="$(mktemp)"
   for attempt in 1 2 3 4 5 6 7 8; do
-    throttle circleci 1000
-    if code="$(curl --silent --show-error --location --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
-      --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - "$url" \
-      <<<"header = \"Circle-Token: $CIRCLECI_TOKEN\"")"; then rc=0; else rc=$?; fi
+    target="$url"
+    for hop in 1 2 3 4 5 6; do
+      throttle circleci 1000
+      if token_host "$target"; then
+        if code="$(curl --silent --show-error --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
+          --output "$out" --dump-header "$headers" --write-out '%{http_code} %{redirect_url}' -K - "$target" \
+          <<<"header = \"Circle-Token: $CIRCLECI_TOKEN\"")"; then rc=0; else rc=$?; fi
+      else
+        if code="$(curl --silent --show-error --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
+          --output "$out" --dump-header "$headers" --write-out '%{http_code} %{redirect_url}' "$target")"; then rc=0; else rc=$?; fi
+      fi
+      next="${code#* }" code="${code%% *}"
+      [[ "$rc" == 0 && "$code" == 3?? && -n "$next" ]] || break
+      target="$next"
+    done
     if [[ "$rc" == 0 && "$code" == 2?? ]]; then
       if [[ -n "$output" ]]; then mv "$out" "$output"; else cat "$out"; rm -f "$out"; fi
       rm -f "$headers"
@@ -94,6 +119,7 @@ cc() {
 # request instead of posting again. One CircleCI controller runs at a time.
 cc_create() {
   local body="$1" sha="$2" requested_at="$3" state="$4" out headers code="" rc wait attempt
+  token_host "$api/project/$slug/pipeline/run" || { echo "refusing to send the token to $api" >&2; return 1; }
   out="$(mktemp)" headers="$(mktemp)"
   for attempt in 1 2 3 4 5; do
     throttle circleci 1000
@@ -119,10 +145,16 @@ cc_create() {
     echo "lookup failed, so whether the pipeline was accepted is unknown; not posting again" >&2
     return 1
   fi
-  match="$(jq -c --arg tag "pilot/$sha" --arg since "$requested_at" \
-    '[.items[] | select(.vcs.tag == $tag and .created_at >= ($since | sub("\\.[0-9]+Z$"; "Z")))] | if length == 1 then .[0] else empty end' <<<"$pipelines")"
+  # Timestamps are parsed to epoch seconds, not compared as strings. The
+  # window starts 60 s before the orb-clock request to allow for clock skew;
+  # the match must also carry the measured SHA and be unique.
+  match="$(jq -c --arg tag "pilot/$sha" --arg sha "$sha" --arg since "$requested_at" '
+    def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+    ($since | epoch) as $start
+    | [.items[] | select(.vcs.tag == $tag and .vcs.revision == $sha and ((.created_at | epoch) >= $start - 60))]
+    | if length == 1 then .[0] else empty end' <<<"$pipelines")"
   if [[ -z "$match" ]]; then
-    echo "no single pipeline on pilot/$sha since $requested_at; not posting again" >&2
+    echo "no unique pipeline on pilot/$sha at $sha since $requested_at (60 s skew window); not posting again" >&2
     return 1
   fi
   echo "$code" > "$state/reconciled"
@@ -138,14 +170,15 @@ sanitize() {
 }
 
 # workflow_state PIPELINE_ID: prints "terminal" once the pipeline has errored
-# or its single workflow has a terminal status.
+# or its workflow has a final status. "failing" means a job failed while other
+# work may still run, so it is not terminal.
 workflow_state() {
   local pipeline workflows
   pipeline="$(cc "$api/pipeline/$1")" || { echo poll-error; return; }
   if [[ "$(jq -r .state <<<"$pipeline")" == errored ]]; then echo terminal; return; fi
   workflows="$(cc "$api/pipeline/$1/workflow")" || { echo poll-error; return; }
   jq -r 'if (.items | length) == 0 then "pending"
-         elif all(.items[]; .status | IN("success", "failed", "error", "failing", "canceled", "unauthorized", "not_run")) then "terminal"
+         elif all(.items[]; .status | IN("success", "failed", "error", "canceled", "unauthorized", "not_run")) then "terminal"
          else .items[0].status end' <<<"$workflows"
 }
 
@@ -232,7 +265,8 @@ collect() {
   jq -n --argjson pipeline "$pipeline" --argjson workflows "$workflows" --argjson jobs "$details" --argjson job_list "$job_list" \
     '{pipeline: $pipeline, workflow: ($workflows.items[0] // {}), workflows: $workflows.items, job_list: $job_list, jobs: $jobs}' > "$dir/circleci.json"
 
-  # Step logs come from API v1.1; output URLs are presigned and need no token.
+  # Step logs come from API v1.1; output URLs are presigned, so cc sends them
+  # no token.
   rm -rf "$dir/artifact"
   mkdir -p "$dir/artifact"
   local workload_number
@@ -241,7 +275,7 @@ collect() {
     cc "$api_v1/project/github/$repo/$workload_number" "$dir/job-v1.json" || true
     jq -r '[.steps[]? | .actions[]? | select(.output_url) | {name, url: .output_url}] | to_entries[] | "\(.key)\t\(.value.url)"' "$dir/job-v1.json" 2>/dev/null |
       while IFS=$'\t' read -r index url; do
-        curl --fail --silent --show-error --location --max-time 120 "$url" | jq -r '.[]?.message // empty' | sanitize > "$dir/logs/step-$index.txt" || true
+        { cc "$url" | jq -r '.[]?.message // empty' | sanitize > "$dir/logs/step-$index.txt"; } || true
       done
     cc "$api/project/$slug/$workload_number/artifacts" "$dir/artifacts.json"
     jq -r '.items[] | select(.path | startswith("pilot/")) | "\(.url)\t\(.path)"' "$dir/artifacts.json" |
