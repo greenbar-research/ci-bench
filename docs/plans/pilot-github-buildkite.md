@@ -391,6 +391,13 @@ qualification `missing` while that volume exists.
   any other failure, the controller looks up the build by its
   `CI_BENCH_REQUEST_ID` env instead of posting again. A reconciled build
   records that `trigger_accepted_at` is the lookup time.
+- **CircleCI creates** cannot carry a request ID, and tag, SHA, and time
+  alone can match an earlier probe. So the controller records the project's
+  recent pipeline IDs before the request. After an ambiguous create it adopts
+  a pipeline only when that baseline covers the 60 s window and exactly one
+  new pipeline matches. Otherwise acceptance stays unknown, with no second
+  POST. The CircleCI token goes only to https `circleci.com` and
+  `output.circle-artifacts.com`; redirects are followed by hand.
 - **Three revisions per sample:**
   - the measured source, in `comparison_group`;
   - `controller_revision`, the controller code that started and polled the

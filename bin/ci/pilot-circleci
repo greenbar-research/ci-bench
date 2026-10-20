@@ -114,12 +114,29 @@ cc() {
 
 # cc_create BODY_FILE SHA REQUESTED_AT STATE_DIR: creates one pipeline and
 # prints it. Only a transport-complete 429 is retried. Any other failure may
-# follow acceptance, and pipeline parameters cannot carry a request ID, so the
-# controller looks for exactly one pipeline on tag pilot/SHA created since the
-# request instead of posting again. One CircleCI controller runs at a time.
+# follow acceptance, and pipeline parameters cannot carry a request ID, so
+# tag, SHA, and time alone do not identify the request: an earlier probe on
+# the same tag can match. Before posting, the controller records the project's
+# recent pipeline IDs as a baseline. It adopts a pipeline after an ambiguous
+# create only when the baseline is complete for the 60 s window and exactly
+# one new pipeline (not in the baseline) matches the tag, SHA, and window;
+# otherwise acceptance stays unknown and nothing is posted again. One
+# CircleCI controller runs at a time.
 cc_create() {
   local body="$1" sha="$2" requested_at="$3" state="$4" out headers code="" rc wait attempt
   token_host "$api/project/$slug/pipeline/run" || { echo "refusing to send the token to $api" >&2; return 1; }
+  # The baseline (STATE_DIR/baseline.json, written by take_baseline before
+  # requested_at) is complete for the window only if it is the whole list or
+  # its oldest entry predates the window start.
+  local baseline_complete=false
+  if [[ -s "$state/baseline.json" ]]; then
+    baseline_complete="$(jq --arg since "$requested_at" '
+      def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+      ($since | epoch) as $start
+      | (.items | length) == 0 or (.next_page_token == null) or ([.items[].created_at | epoch] | min) < ($start - 60)' "$state/baseline.json")"
+    jq '[.items[].id]' "$state/baseline.json" > "$state/baseline_ids.json"
+  fi
+  echo "$baseline_complete" > "$state/baseline_complete"
   out="$(mktemp)" headers="$(mktemp)"
   for attempt in 1 2 3 4 5; do
     throttle circleci 1000
@@ -138,7 +155,11 @@ cc_create() {
     sleep "$(( wait > 0 ? wait : 30 ))"
   done
   rm -f "$out" "$headers"
-  echo "pipeline create returned HTTP ${code:-none}, curl exit ${rc:-none}; reconciling by tag and time" >&2
+  echo "pipeline create returned HTTP ${code:-none}, curl exit ${rc:-none}; reconciling against the pre-create baseline" >&2
+  if [[ "$baseline_complete" != true ]]; then
+    echo "pre-create baseline was unavailable or incomplete for the window; acceptance unknown; not posting again" >&2
+    return 1
+  fi
   sleep 10
   local pipelines match
   if ! pipelines="$(cc "$api/project/$slug/pipeline")"; then
@@ -148,17 +169,24 @@ cc_create() {
   # Timestamps are parsed to epoch seconds, not compared as strings. The
   # window starts 60 s before the orb-clock request to allow for clock skew;
   # the match must also carry the measured SHA and be unique.
-  match="$(jq -c --arg tag "pilot/$sha" --arg sha "$sha" --arg since "$requested_at" '
+  match="$(jq -c --arg tag "pilot/$sha" --arg sha "$sha" --arg since "$requested_at" --slurpfile seen "$state/baseline_ids.json" '
     def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
     ($since | epoch) as $start
-    | [.items[] | select(.vcs.tag == $tag and .vcs.revision == $sha and ((.created_at | epoch) >= $start - 60))]
+    | [.items[] | select(.vcs.tag == $tag and .vcs.revision == $sha and ((.created_at | epoch) >= $start - 60)
+                         and (.id as $id | $seen[0] | index($id) | not))]
     | if length == 1 then .[0] else empty end' <<<"$pipelines")"
   if [[ -z "$match" ]]; then
-    echo "no unique pipeline on pilot/$sha at $sha since $requested_at (60 s skew window); not posting again" >&2
+    echo "no unique new pipeline on pilot/$sha at $sha since $requested_at (60 s skew window, baseline excluded); acceptance unknown; not posting again" >&2
     return 1
   fi
   echo "$code" > "$state/reconciled"
   printf '%s\n' "$match"
+}
+
+# take_baseline STATE_DIR: records the project's recent pipelines before the
+# request, outside the request-to-send interval; empty when unavailable.
+take_baseline() {
+  cc "$api/project/$slug/pipeline" > "$1/baseline.json" || : > "$1/baseline.json"
 }
 
 sanitize() {
@@ -203,6 +231,7 @@ run() {
   body="$scratch/body.json"
   jq -n --arg definition "$definition" --arg tag "pilot/$sha" --argjson params "$params" \
     '{definition_id: $definition, config: {tag: $tag}, checkout: {tag: $tag}, parameters: $params}' > "$body"
+  take_baseline "$scratch"
   # requested_at precedes the limiter wait; first_send_at follows it.
   requested_at="$(iso_now)"
   response="$(cc_create "$body" "$sha" "$requested_at" "$scratch")"
