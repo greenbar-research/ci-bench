@@ -60,17 +60,20 @@ verify_pilot_tag() {
   fi
 }
 
-# token_host URL: succeeds when URL is https on a host allowed to receive the
-# CircleCI token: circleci.com and CircleCI's artifact host, plus the host of
-# CI_BENCH_CIRCLECI_API when overridden for local tests. Presigned log URLs and
-# any other host never get the token.
+# token_host URL: succeeds when URL may receive the CircleCI token. Presigned
+# step-output URLs carry their own authorization and never get it, whatever the
+# override. Otherwise only https on circleci.com and CircleCI's artifact host.
+# CI_BENCH_CIRCLECI_API extends that only for local tests: when it names a
+# loopback host (localhost, 127.0.0.1, [::1]), URLs under its origin also
+# qualify. A production override (https://circleci.com/api/v2) adds nothing.
 token_host() {
   local url="$1" host test_host
-  host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$url")"
-  test_host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"${CI_BENCH_CIRCLECI_API:-}")"
-  if [[ -n "${CI_BENCH_CIRCLECI_API:-}" && "$host" == "$test_host" && "$url" == "${CI_BENCH_CIRCLECI_API%%/api/*}"* ]]; then return 0; fi
-  # Presigned step-output URLs carry their own authorization; never add the token.
   [[ "$url" != *"/output/presigned/"* ]] || return 1
+  host="$(sed -E 's#^[a-z]+://(\[[^]]+\]|[^/:]+).*#\1#' <<<"$url")"
+  test_host="$(sed -E 's#^[a-z]+://(\[[^]]+\]|[^/:]+).*#\1#' <<<"${CI_BENCH_CIRCLECI_API:-}")"
+  if [[ -n "${CI_BENCH_CIRCLECI_API:-}" && "$test_host" =~ ^(localhost|127\.0\.0\.1|\[::1\])$ ]]; then
+    [[ "$host" == "$test_host" && "$url" == "${CI_BENCH_CIRCLECI_API%%/api/*}"/* ]] && return 0
+  fi
   [[ "$url" == https://* ]] && [[ "$host" == circleci.com || "$host" == output.circle-artifacts.com ]]
 }
 
