@@ -36,7 +36,9 @@ runner = read_env(File.join(artifact_dir, "runner.env"))
 cache = read_env(File.join(artifact_dir, "cache.env"))
 result = read_json(File.join(artifact_dir, "result.json"))
 checksums = File.exist?(File.join(dir, "artifact-checksums.txt")) ? File.read(File.join(dir, "artifact-checksums.txt")).strip : "unavailable"
-manifest_profile = controller.dig("inputs", "profile")
+manifest_profile = controller["profile"] || controller.dig("inputs", "profile")
+probe = manifest_profile == "probe"
+observation = controller["terminal_observation"] || {}
 
 # In-job phase boundaries come from the runner clock (epoch milliseconds).
 marks = Hash.new { |hash, key| hash[key] = {} }
@@ -47,7 +49,7 @@ if File.exist?(phases_path)
     marks[phase][event] ||= Integer(at)
   end
 end
-phase_names = %w[checkout cache setup dependencies services workload artifact]
+phase_names = probe ? %w[checkout identity marker artifact] : %w[checkout cache setup dependencies services workload artifact]
 phases = phase_names.to_h do |name|
   start, finish = marks[name].values_at("start", "end")
   [name, start && finish ? { "duration_ms" => finish - start, "started_at_ms" => start, "ended_at_ms" => finish } : "unknown"]
@@ -79,13 +81,20 @@ issues = []
 issues << "provider run status #{run["status"].inspect} is not completed" unless run["status"] == "completed"
 issues << "provider run conclusion #{run["conclusion"].inspect} is not success" unless run["conclusion"] == "success"
 issues << "provider job conclusion #{job["conclusion"].inspect} is not success" unless job["conclusion"] == "success"
-issues << "Docker builder is not verified local (endpoint #{runner["docker_endpoint"].inspect}, driver #{runner["docker_builder"].inspect})" unless docker_local
 issues << "runner envelope mismatch" unless runner["envelope_match"] == "true"
-issues << "cache expectation not met" unless cache["cache_expectation"] == "met"
-issues << "workload result missing or not passed" unless result&.fetch("status", nil) == "passed"
-issues << "verification digest mismatch" if result && expected_digest && result.dig("verification", "digest") != expected_digest
 issues << "source SHA mismatch" unless run["head_sha"] && run["head_sha"] == controller.dig("inputs", "expected_sha") && runner["checkout_sha"] == run["head_sha"]
-issues << "source tree dirty" if result && result["git_dirty"] != false
+if probe
+  marker_path = File.join(artifact_dir, "marker.txt")
+  source_path = File.join(artifact_dir, "source.txt")
+  issues << "completion marker missing or not the expected SHA" unless File.exist?(marker_path) && File.read(marker_path).strip == controller.dig("inputs", "expected_sha")
+  issues << "source tree dirty" unless File.exist?(source_path) && File.readlines(source_path, chomp: true).drop(1).reject(&:empty?).empty?
+else
+  issues << "Docker builder is not verified local (endpoint #{runner["docker_endpoint"].inspect}, driver #{runner["docker_builder"].inspect})" unless docker_local
+  issues << "cache expectation not met" unless cache["cache_expectation"] == "met"
+  issues << "workload result missing or not passed" unless result&.fetch("status", nil) == "passed"
+  issues << "verification digest mismatch" if result && expected_digest && result.dig("verification", "digest") != expected_digest
+  issues << "source tree dirty" if result && result["git_dirty"] != false
+end
 issues << "artifact checksums #{checksums}" unless checksums == "verified"
 issues << "run attempt is not 1" unless run["run_attempt"] == 1
 
@@ -105,7 +114,8 @@ record = {
   "inputs" => controller["inputs"],
   "workload_class" => {
     "smoke" => "smoke/setup baseline (installs the full Ruby, Node, ImageMagick, and browser stack and starts services; not pure orchestration overhead)",
-    "full" => "full serial Rails workload"
+    "full" => "full serial Rails workload",
+    "probe" => "pure orchestration probe (checkout, runner identity record, completion marker, evidence upload; no dependencies or services)"
   }.fetch(manifest_profile, "unknown"),
   "docker_builder_local" => docker_local,
   "provider" => {
@@ -136,12 +146,30 @@ record = {
     "provider_job_ms" => ms_between(job["started_at"], job["completed_at"]),
     "provider_run_ms" => ms_between(run["run_started_at"], job["completed_at"]),
     "controller_accept_to_job_completed_ms" => ms_between(controller["trigger_accepted_at"], job["completed_at"]),
-    "controller_accept_to_job_completed_note" => "Orb-clock acceptance to GitHub-clock job completion; excludes request-to-acceptance and is not a provider terminal-result boundary. Not a complete trigger-to-result interval."
+    "controller_accept_to_job_completed_note" => "Orb-clock acceptance to GitHub-clock job completion; excludes request-to-acceptance and is not a provider terminal-result boundary. Not a complete trigger-to-result interval.",
+    "controller_last_nonterminal_response_at" => observation["last_nonterminal_response_at"] || "not recorded",
+    "controller_terminal_observed_at" => observation["observed_at"] || "not recorded",
+    "controller_poll_interval_ms" => observation["poll_interval_ms"] || "not recorded",
+    "provider_terminal_boundary" => {
+      "job_completed_at" => job["completed_at"] || "unknown",
+      "completed_run_updated_at" => run["status"] == "completed" ? run["updated_at"] : "unknown",
+      "note" => "GitHub exposes no run completed_at; the completed run's updated_at is the latest provider-side terminal timestamp."
+    },
+    "controller_request_to_accept_ms" => ms_between(controller["trigger_requested_at"], controller["trigger_accepted_at"]),
+    "controller_request_to_terminal_observed_ms" => ms_between(controller["trigger_requested_at"], observation["observed_at"]),
+    "controller_accept_to_terminal_observed_ms" => ms_between(controller["trigger_accepted_at"], observation["observed_at"]),
+    "provider_run_created_to_terminal_ms" => run["status"] == "completed" ? ms_between(run["created_at"], run["updated_at"]) : "unknown",
+    "interval_clock_classes" => {
+      "same_clock_orb" => %w[controller_request_to_accept_ms controller_request_to_terminal_observed_ms controller_accept_to_terminal_observed_ms],
+      "same_clock_provider" => %w[provider_queue_ms provider_job_ms provider_run_ms provider_run_created_to_terminal_ms],
+      "cross_clock_estimate" => %w[controller_accept_to_job_completed_ms],
+      "note" => "Terminal observation intervals include up to one poll interval plus API latency after the provider terminal state; not recorded for samples collected after completion."
+    }
   },
   "phases" => phases,
   "provider_steps" => steps,
   "runner" => runner,
-  "cache" => cache.merge(
+  "cache" => probe ? { "benchmark_cache" => "not used by the probe" } : cache.merge(
     "provider_owned_unknowns" => [
       "runner image tool cache contents",
       "Docker base-image layers present on the host image",

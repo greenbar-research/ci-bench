@@ -33,8 +33,9 @@ instrumentation are sound before larger runs.
     and must be identical on every target.
   - The approved pilot also includes a short workflow-overhead measurement.
     The smoke/setup baseline does not fulfil it. The initial four-run
-    allocation is used up, so this measurement is pending a separate bounded
-    execution allocation.
+    allocation is used up, so it has a separate allocation of at most two
+    runs of `.github/workflows/probe.yml` (see
+    [Orchestration probe](#orchestration-probe)).
 - **Shape:** one serial job per dispatch, and at most one active workload job,
   which stays well below the limit of four. Concurrency group
   `ci-bench-pilot` serializes dispatches.
@@ -230,8 +231,45 @@ Qualifications:
   samples therefore cannot isolate any causal timing benefit from the
   cache, including in the dependency phases. Do not attribute timing
   improvements to the cache from them.
-- The short workflow-overhead measurement remains pending a separate bounded
-  execution allocation (see [Contract](#contract)).
+- The short workflow-overhead measurement is not covered by these four runs.
+  It has its own allocation (see [Orchestration probe](#orchestration-probe)).
+
+### Orchestration probe
+
+`.github/workflows/probe.yml` ("Unscored orchestration probe") is the pure
+short orchestration measurement. Its job does only the following:
+
+- a pinned checkout;
+- the `pilot-runner` identity and envelope record;
+- a completion marker containing the checked-out SHA;
+- the evidence upload.
+
+It installs no dependencies and starts no services, and it is not the
+smoke/setup baseline. `bin/ci/pilot-github probe EXPECTED_SHA` dispatches the
+probe, records trigger request and acceptance, and polls every 2 s. It records
+the last non-terminal response and the first terminal observation, then
+collects the run.
+
+Provenance groups intervals by clock:
+
+- **Same clock, orb:** request to acceptance, and request or acceptance to
+  terminal observation. Observation includes up to one poll interval plus API
+  latency.
+- **Same clock, GitHub:** job queue and duration, and run creation to the
+  completed run's `updated_at`. GitHub has no run `completed_at`.
+- **Cross-clock estimate:** `controller_accept_to_job_completed_ms`.
+
+A probe sample is valid only if all of these hold:
+
+- the run and job succeeded;
+- the envelope matches;
+- the source SHA matches;
+- the marker equals the expected SHA;
+- the tree is clean;
+- the checksums verify.
+
+At most two probe runs are allowed. A failure is reported with its cause
+before any further run.
 
 ## Buildkite blocker
 

@@ -3,9 +3,11 @@
 #
 #   bin/ci/pilot-github dispatch PROFILE CACHE_PHASE CACHE_EPOCH EXPECTED_SHA
 #   bin/ci/pilot-github collect RUN_ID [EVIDENCE_DIR]
+#   bin/ci/pilot-github probe EXPECTED_SHA
 #
 # dispatch records controller clock request/acceptance times and the run ID
-# returned by the workflow dispatch API. collect records provider IDs and
+# returned by the workflow dispatch API. probe does the same for probe.yml,
+# polls to the controller's terminal observation, then collects. collect records provider IDs and
 # boundaries, the in-job artifact, sanitized logs, and a provenance record.
 # Evidence stays local under tmp/pilot-evidence (gitignored) unless copied.
 set -euo pipefail
@@ -42,6 +44,51 @@ dispatch() {
       cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha},
       dispatch_response: $response}' > "$dir/controller.json"
   jq -r '.dispatch_response | "\(.workflow_run_id) \(.html_url)"' "$dir/controller.json"
+}
+
+probe() {
+  # Dispatches the orchestration probe, then polls until the run is terminal
+  # so the controller records its own terminal observation on the orb clock.
+  local sha="$1" poll_interval_ms=2000
+  local remote_sha
+  remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
+  if [[ "$remote_sha" != "$sha" ]]; then
+    echo "origin main is $remote_sha, not expected $sha; refusing to dispatch" >&2
+    exit 1
+  fi
+  local body requested_at response accepted_at run_id dir status last_pending_at observed_at polls=0
+  body="$(jq -n --arg sha "$sha" '{ref: "main", return_run_details: true, inputs: {expected_sha: $sha}}')"
+  requested_at="$(iso_now)"
+  response="$(gh api --method POST "repos/$repo/actions/workflows/probe.yml/dispatches" --input - <<<"$body")"
+  accepted_at="$(iso_now)"
+  run_id="$(jq -r .workflow_run_id <<<"$response")"
+  dir="tmp/pilot-evidence/$run_id"
+  mkdir -p "$dir"
+  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg sha "$sha" \
+    --argjson response "$response" \
+    '{controller_clock: "orb UTC", workflow: "probe.yml", profile: "probe",
+      trigger_requested_at: $requested_at, trigger_accepted_at: $accepted_at,
+      inputs: {expected_sha: $sha}, dispatch_response: $response}' > "$dir/controller.json"
+  jq -r '"\(.workflow_run_id) \(.html_url)"' <<<"$response"
+  # The terminal state became visible between last_nonterminal_response_at
+  # and observed_at, both on the orb clock.
+  last_pending_at="$accepted_at"
+  while :; do
+    polls=$((polls + 1))
+    status="$(gh api "repos/$repo/actions/runs/$run_id" --jq .status || echo poll-error)"
+    if [[ "$status" == completed ]]; then
+      observed_at="$(iso_now)"
+      break
+    fi
+    last_pending_at="$(iso_now)"
+    sleep "$((poll_interval_ms / 1000))"
+  done
+  jq --arg observed_at "$observed_at" --arg last_pending_at "$last_pending_at" \
+    --argjson poll_interval_ms "$poll_interval_ms" --argjson polls "$polls" \
+    '.terminal_observation = {observed_at: $observed_at, last_nonterminal_response_at: $last_pending_at,
+      poll_interval_ms: $poll_interval_ms, polls: $polls}' "$dir/controller.json" > "$dir/controller.json.new"
+  mv "$dir/controller.json.new" "$dir/controller.json"
+  collect "$run_id" "$dir"
 }
 
 sanitize() {
@@ -88,5 +135,6 @@ collect() {
 case "${1:-}" in
   dispatch) shift; dispatch "$@" ;;
   collect) shift; collect "$@" ;;
-  *) sed -n '2,12p' "$0" >&2; exit 2 ;;
+  probe) shift; probe "$@" ;;
+  *) sed -n '2,14p' "$0" >&2; exit 2 ;;
 esac
