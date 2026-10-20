@@ -72,7 +72,14 @@ if manifest_profile && File.exist?(manifest_path)
   expected_digest = YAML.safe_load_file(manifest_path).dig("profiles", manifest_profile, "expected_verification_digest")
 end
 
+docker_local = runner["docker_endpoint"].to_s.start_with?("unix://") &&
+  %w[docker docker-container].include?(runner["docker_builder"])
+
 issues = []
+issues << "provider run status #{run["status"].inspect} is not completed" unless run["status"] == "completed"
+issues << "provider run conclusion #{run["conclusion"].inspect} is not success" unless run["conclusion"] == "success"
+issues << "provider job conclusion #{job["conclusion"].inspect} is not success" unless job["conclusion"] == "success"
+issues << "Docker builder is not verified local (endpoint #{runner["docker_endpoint"].inspect}, driver #{runner["docker_builder"].inspect})" unless docker_local
 issues << "runner envelope mismatch" unless runner["envelope_match"] == "true"
 issues << "cache expectation not met" unless cache["cache_expectation"] == "met"
 issues << "workload result missing or not passed" unless result&.fetch("status", nil) == "passed"
@@ -96,6 +103,11 @@ record = {
     "result_git_dirty" => result&.fetch("git_dirty", nil)
   },
   "inputs" => controller["inputs"],
+  "workload_class" => {
+    "smoke" => "smoke/setup baseline (installs the full Ruby, Node, ImageMagick, and browser stack and starts services; not pure orchestration overhead)",
+    "full" => "full serial Rails workload"
+  }.fetch(manifest_profile, "unknown"),
+  "docker_builder_local" => docker_local,
   "provider" => {
     "run_id" => run["id"],
     "run_attempt" => run["run_attempt"],
@@ -123,7 +135,8 @@ record = {
     "provider_queue_ms" => ms_between(job["created_at"], job["started_at"]),
     "provider_job_ms" => ms_between(job["started_at"], job["completed_at"]),
     "provider_run_ms" => ms_between(run["run_started_at"], job["completed_at"]),
-    "controller_accept_to_job_completed_ms" => ms_between(controller["trigger_accepted_at"], job["completed_at"])
+    "controller_accept_to_job_completed_ms" => ms_between(controller["trigger_accepted_at"], job["completed_at"]),
+    "controller_accept_to_job_completed_note" => "Orb-clock acceptance to GitHub-clock job completion; excludes request-to-acceptance and is not a provider terminal-result boundary. Not a complete trigger-to-result interval."
   },
   "phases" => phases,
   "provider_steps" => steps,

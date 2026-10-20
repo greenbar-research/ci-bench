@@ -24,12 +24,17 @@ instrumentation are sound before larger runs.
   requires `expected_sha`. A job that checks out any other commit fails and
   is recorded as an invalid sample.
 - **Workloads:** the existing `bin/bench` profiles, unchanged:
-  - `smoke` is the short, deterministic overhead workload, with pinned
-    digest `4addb8bd…`.
+  - `smoke` is the smoke/setup baseline, with pinned digest `4addb8bd…`.
+    It installs the full Ruby, Node, ImageMagick, and browser stack and
+    starts services, so it is not pure orchestration overhead.
   - `full` is the existing full serial Rails workload, with pinned digest
     `3bdfcd70…`.
   - Useful work and verification digests come from `benchmark/manifest.yml`
     and must be identical on every target.
+  - The approved pilot also includes a short workflow-overhead measurement.
+    The smoke/setup baseline does not fulfil it. The initial four-run
+    allocation is used up, so this measurement is pending a separate bounded
+    execution allocation.
 - **Shape:** one serial job per dispatch, and at most one active workload job,
   which stays well below the limit of four. Concurrency group
   `ci-bench-pilot` serializes dispatches.
@@ -101,7 +106,19 @@ Evidence is collected at four levels.
 - Writes one companion record for each sample.
 - Marks a phase `unknown` when its timing is unavailable. The artifact upload
   duration comes only from provider step timings.
+- Labels each sample's `workload_class` (smoke/setup baseline or full serial
+  Rails workload).
+- Keeps `controller_accept_to_job_completed_ms` under that name. It runs from
+  orb-clock acceptance to GitHub-clock job completion, so it excludes
+  request-to-acceptance, carries clock skew, and is not a provider
+  terminal-result boundary or a complete trigger-to-result interval.
 - Computes `comparative_sample_valid` and lists `invalid_reasons`, covering:
+  - provider run status other than `completed`, or run or job conclusion
+    other than `success`. Such a sample stays retained and invalid even when
+    a passing workload result and artifact exist.
+  - Docker builder not verified local (`docker_builder_local` requires a
+    `unix://` endpoint and the `docker` or `docker-container` driver).
+    Remote or unknown builders are invalid.
   - envelope mismatch
   - cache expectation not met
   - digest mismatch
@@ -190,6 +207,31 @@ allowed, in this order:
 
 At most two additional diagnostic runs are allowed, and only for a specific
 corrected failure. Failed samples are preserved.
+
+### Batch status (2026-10-20)
+
+All four initial runs used pilot revision
+`16f944b15a91d8935bb525131b87d8e6d22aaff1`, and the allocation is used up.
+No diagnostic runs were used. Each run succeeded and is a valid sample under
+the provenance rules above. Evidence artifacts expire on 2026-11-19.
+
+| Sample | Epoch | Run | Artifact | CPU |
+| --- | --- | --- | --- | --- |
+| smoke cold | `pilot-20261020-a` | [39389806750](https://github.com/greenbar-research/ci-bench/actions/runs/39389806750) | [12248554049](https://github.com/greenbar-research/ci-bench/actions/runs/39389806750/artifacts/12248554049) | AMD EPYC 7763 |
+| smoke warm | `pilot-20261020-a` | [39390104570](https://github.com/greenbar-research/ci-bench/actions/runs/39390104570) | [12249296628](https://github.com/greenbar-research/ci-bench/actions/runs/39390104570/artifacts/12249296628) | AMD EPYC 9V45 |
+| full cold | `pilot-20261020-b` | [39390259355](https://github.com/greenbar-research/ci-bench/actions/runs/39390259355) | [12249963393](https://github.com/greenbar-research/ci-bench/actions/runs/39390259355/artifacts/12249963393) | AMD EPYC 7763 |
+| full warm | `pilot-20261020-b` | [39392838022](https://github.com/greenbar-research/ci-bench/actions/runs/39392838022) | [12251336137](https://github.com/greenbar-research/ci-bench/actions/runs/39392838022/artifacts/12251336137) | AMD EPYC 9V45 |
+
+Qualifications:
+
+- The exact cold misses and warm hits are verified. However, each cold/warm
+  pair ran on different CPU models. The full pair also differed in runner
+  image (20261018.339.1 cold, 20261012.334.1 warm) and kernel. These four
+  samples therefore cannot isolate any causal timing benefit from the
+  cache, including in the dependency phases. Do not attribute timing
+  improvements to the cache from them.
+- The short workflow-overhead measurement remains pending a separate bounded
+  execution allocation (see [Contract](#contract)).
 
 ## Buildkite blocker
 

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: smoke (deterministic overhead) or full (serial Rails workload)
+        description: smoke (smoke/setup baseline) or full (serial Rails workload)
         required: true
         type: choice
         options:
