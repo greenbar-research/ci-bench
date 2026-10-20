@@ -411,13 +411,18 @@ qualification `missing` while that volume exists.
   `ubuntu-2404:2026.05.1` machine image (not the mutable `current` tag) with `resource_class: large.gen2` (4 vCPU /
   16 GiB). It sets `CI_BENCH_RUNNER=circleci`, and `pilot-runner` identifies
   the target by `CIRCLECI=true`.
+- The organization disables deploy keys, so CircleCI's SSH `checkout` step
+  has no key. A `pinned-checkout` command fetches the public repository
+  anonymously over HTTPS at exactly `expected_sha`, and verifies that the
+  pipeline revision (`CIRCLE_SHA1`) and tag `pilot/<sha>` name that commit.
 - Workflows run only when an API trigger sets `expected_sha`. A push, or a
   pipeline without parameters, resolves to no workflows.
 - `restore_cache` and `save_cache` hold the logical cache entry
   (`vendor/bundle`, `tmp/ci-bench-cache`) under the epoch and profile key.
   `docker_layer_caching` stays off.
 - R6 added the config. R7 pins the dated image and drops an unsupported
-  `when` key on `store_artifacts`. CircleCI samples are measured at R7 and
+  `when` key on `store_artifacts`. R8 replaces the SSH checkout with the
+  pinned HTTPS checkout. CircleCI samples are measured at R8 and
   form their own comparison group over the same useful work. Other targets
   are not rerun because of the CircleCI config.
 

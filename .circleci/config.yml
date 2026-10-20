@@ -29,6 +29,30 @@ parameters:
     type: string
     default: none
 
+commands:
+  # The organization disables deploy keys, so CircleCI's SSH checkout has no
+  # key. This fetches the public repository anonymously over HTTPS, checks out
+  # exactly expected_sha, and verifies the pipeline revision and the immutable
+  # tag pilot/<sha> name the same commit.
+  pinned-checkout:
+    steps:
+      - run:
+          name: Check out expected commit (anonymous HTTPS)
+          command: |
+            set -euo pipefail
+            sha="$CI_BENCH_EXPECTED_SHA"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "expected_sha must be a full commit SHA" >&2; exit 1; }
+            [[ "$CIRCLE_SHA1" == "$sha" ]] || { echo "pipeline revision $CIRCLE_SHA1 is not $sha" >&2; exit 1; }
+            url=https://github.com/greenbar-research/ci-bench.git
+            tagged="$(git ls-remote "$url" "refs/tags/pilot/$sha" | cut -f1)"
+            [[ "$tagged" == "$sha" ]] || { echo "tag pilot/$sha names ${tagged:-nothing}, not $sha" >&2; exit 1; }
+            mkdir -p ~/project && cd ~/project
+            git init -q .
+            git remote add origin "$url"
+            git fetch -q --depth 1 origin "$sha"
+            git checkout -q --detach FETCH_HEAD
+            [[ "$(git rev-parse HEAD)" == "$sha" ]]
+
 executors:
   pilot:
     machine:
@@ -44,7 +68,7 @@ jobs:
   probe:
     executor: pilot
     steps:
-      - checkout
+      - pinned-checkout
       - run:
           name: Orchestration probe
           command: bin/ci/pilot-native probe
@@ -59,7 +83,7 @@ jobs:
       CI_BENCH_CACHE_PHASE: << pipeline.parameters.cache_phase >>
       CI_BENCH_CACHE_EPOCH: << pipeline.parameters.cache_epoch >>
     steps:
-      - checkout
+      - pinned-checkout
       # The same logical entry as actions/cache in pilot.yml. A sentinel
       # written only after a successful run proves the hit or miss.
       - restore_cache:
