@@ -1,0 +1,14 @@
+# Unscored Buildkite native (non-GHAC) orchestration probe. Uploaded by
+# bin/ci/pilot-bk-import when the REST build sets
+# CI_BENCH_WORKFLOW=native-probe.yml. The image is the same pinned Ubuntu 24.04
+# agent image that GHAC selects for runs-on ubuntu-24.04.
+steps:
+  - label: ":buildkite: Native orchestration probe"
+    key: native-probe
+    image: "buildkite.namespace-images.com/agent-base@sha256:243c4015ea220c526b7976df88b037aff1930c1278d8d716b2f5f90247c72a08"
+    agents:
+      queue: linux-medium
+    env:
+      BUILDX_BUILDER: default
+      CI_BENCH_RUNNER: buildkite-native
+    command: bin/ci/pilot-native probe

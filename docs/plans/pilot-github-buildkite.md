@@ -346,6 +346,41 @@ earlier runs:
 
 Failures are retained. A repeated identical failure stops that target.
 
+The cluster already holds Buildkite's
+`buildkite-local-builder-greenbar-research-ci-bench` volume. Buildkite
+creates it for organizations without remote Docker builders, and it cannot be
+disabled. Buildkite cold samples are therefore recorded with cold
+qualification `missing` while that volume exists.
+
+## Buildkite native YAML target
+
+The `buildkite-native` target runs the same useful work without GHAC:
+
+- `.buildkite/native-probe.yml` and `.buildkite/native-pilot.yml` each have
+  one step on `linux-medium`, using the same pinned Ubuntu 24.04 agent image
+  that GHAC selects for `ubuntu-24.04`.
+- `bin/ci/pilot-native` mirrors `probe.yml` and `pilot.yml` step for step:
+  - the same `ruby-builder` Ruby 3.4.10 archive that `setup-ruby` installs;
+  - Bundler 4.0.9 and Node 24.18.0;
+  - the same system packages, ImageMagick AppImage, and services;
+  - the same `bin/bench` commands and phase marks.
+  It uses `sudo` only when the job is not running as root.
+- `bin/ci/pilot-buildkite run native-probe.yml|native-pilot.yml ...` creates
+  builds. The importer uploads the native file instead of translating a
+  workflow.
+- Caching uses a hosted cache volume named
+  `ci-bench-pilot-<epoch>-<profile>`, holding `vendor/bundle` and
+  `tmp/ci-bench-cache`. This is the Buildkite-native equivalent of the
+  logical `actions/cache` entry. A sentinel written only after a successful
+  run proves hits and misses.
+- Graph parity compares the native file's step keys with the provider's
+  workload jobs.
+
+Native samples form their own comparison group, keyed by the
+`.buildkite/<file>` path. They are compared with GHAC and GitHub samples only
+as a different orchestration definition over the same measured commit and
+useful work.
+
 ## Buildkite blocker (resolved 2026-10-20)
 
 Resolved on 2026-10-20. Onboarding set up the following:

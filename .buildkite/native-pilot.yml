@@ -1,0 +1,22 @@
+# Unscored Buildkite native (non-GHAC) pilot workload. Uploaded by
+# bin/ci/pilot-bk-import when the REST build sets
+# CI_BENCH_WORKFLOW=native-pilot.yml. The upload interpolates the cache volume
+# name from the build env, so each cache epoch gets its own volume. Buildkite
+# commits a volume only after a successful job, and volumes are best-effort, so
+# bin/ci/pilot-native verifies hits with a sentinel.
+steps:
+  - label: ":buildkite: Native pilot ${CI_BENCH_PROFILE} ${CI_BENCH_CACHE_PHASE}"
+    key: native-pilot
+    image: "buildkite.namespace-images.com/agent-base@sha256:243c4015ea220c526b7976df88b037aff1930c1278d8d716b2f5f90247c72a08"
+    agents:
+      queue: linux-medium
+    cache:
+      name: "ci-bench-pilot-${CI_BENCH_CACHE_EPOCH}-${CI_BENCH_PROFILE}"
+      paths:
+        - vendor/bundle
+        - tmp/ci-bench-cache
+    timeout_in_minutes: 50
+    env:
+      BUILDX_BUILDER: default
+      CI_BENCH_RUNNER: buildkite-native
+    command: bin/ci/pilot-native pilot

@@ -42,7 +42,10 @@ observation = controller["terminal_observation"] || {}
 build = read_json(File.join(dir, "build.json"))
 controller_target = controller["target"] || (build ? "buildkite-ghac" : "github-actions")
 workflow_file = controller["workflow"] || (probe ? "probe.yml" : "pilot.yml")
-workflow_path = ".github/workflows/#{workflow_file}"
+# Native Buildkite samples run the pipeline files in .buildkite/ instead of a
+# GitHub Actions workflow; their step keys are the logical jobs.
+native = controller_target == "buildkite-native"
+workflow_path = native ? ".buildkite/#{workflow_file}" : ".github/workflows/#{workflow_file}"
 # Toolchain volume the GHAC runtime itself mounts on generated jobs; recorded
 # as a provider-owned cache like GitHub's runner image tool cache.
 ghac_toolchain_volumes = %w[buildkite-gha-linux-amd64]
@@ -51,7 +54,7 @@ ghac_toolchain_volumes = %w[buildkite-gha-linux-amd64]
 # the raw build.json stays in the evidence directory.
 if build
   build_jobs = build["jobs"] || []
-  workload_jobs = build_jobs.select { |j| j["step_key"].to_s.match?(/\Agha-(?!importer\z|concurrency-)/) }
+  workload_jobs = build_jobs.select { |j| j["step_key"].to_s.match?(native ? /\Anative-/ : /\Agha-(?!importer\z|concurrency-)/) }
   bk_job = workload_jobs.first || {}
   retried = build_jobs.any? { |j| j["retried"] || j["retry_source"] || j["retries_count"].to_i.positive? }
   run = {
@@ -92,12 +95,13 @@ expected_sha = controller.dig("inputs", "expected_sha").to_s
 workflow_blob = expected_sha.match?(/\A[0-9a-f]{40}\z/) ? `git -C #{repo_root} rev-parse --verify --quiet #{expected_sha}:#{workflow_path} 2>/dev/null`.strip : ""
 logical_jobs = begin
   require "yaml"
-  YAML.safe_load(`git -C #{repo_root} show #{expected_sha}:#{workflow_path} 2>/dev/null`).fetch("jobs").keys
+  definition = YAML.safe_load(`git -C #{repo_root} show #{expected_sha}:#{workflow_path} 2>/dev/null`)
+  native ? definition.fetch("steps").map { |step| step.fetch("key") } : definition.fetch("jobs").keys
 rescue StandardError
   []
 end
 graph_parity = !logical_jobs.empty? && provider_workload_jobs.size == logical_jobs.size &&
-  (build.nil? || provider_workload_jobs.sort == logical_jobs.map { |key| "gha-#{key}" }.sort)
+  (build.nil? || provider_workload_jobs.sort == logical_jobs.map { |key| native ? key : "gha-#{key}" }.sort)
 
 # In-job phase boundaries come from the runner clock (epoch milliseconds).
 marks = Hash.new { |hash, key| hash[key] = {} }
@@ -173,7 +177,7 @@ if build
   provider_terminal_boundary = {
     "job_finished_at" => job["completed_at"] || "unknown",
     "build_finished_at" => build["finished_at"] || "unknown",
-    "note" => "Buildkite build finished_at is the provider terminal timestamp; it includes the GHAC concurrency finish step after the workload job."
+    "note" => "Buildkite build finished_at is the provider terminal timestamp; #{native ? "native builds have only the pipeline upload step before the workload step" : "it includes the GHAC concurrency finish step after the workload job"}."
   }
 else
   provider_clock = "GitHub REST API timestamps (1 s precision)"
@@ -203,7 +207,7 @@ cold_qualification =
     "missing: cache volumes present before the build: #{other.join(", ")}"
   else
     toolchain = volumes_before.any? { |v| ghac_toolchain_volumes.include?((v["tag"] || v["name"]).to_s.split("/").last) } ? "present" : "absent"
-    "benchmark-cold: exact dependency-cache miss verified; no container-cache or local-builder volumes before the build; GHAC toolchain volume #{toolchain}; other provider-owned caches unknown"
+    "benchmark-cold: exact dependency-cache miss verified; no container-cache or local-builder volumes before the build; GHAC toolchain volume #{toolchain}#{native ? " (not mounted by native steps)" : ""}; other provider-owned caches unknown"
   end
 
 record = {
@@ -279,7 +283,7 @@ record = {
     "provider_job_ms" => ms_between(job["started_at"], job["completed_at"]),
     "provider_run_ms" => ms_between(run["run_started_at"], job["completed_at"]),
     "controller_accept_to_job_completed_ms" => ms_between(controller["trigger_accepted_at"], job["completed_at"]),
-    "controller_accept_to_job_completed_note" => "Orb-clock acceptance to GitHub-clock job completion; excludes request-to-acceptance and is not a provider terminal-result boundary. Not a complete trigger-to-result interval.",
+    "controller_accept_to_job_completed_note" => "Orb-clock acceptance to #{build ? "Buildkite-clock workload job finished_at" : "GitHub-clock job completed_at"}; excludes request-to-acceptance and is not a provider terminal-result boundary. Not a complete trigger-to-result interval.",
     "controller_last_nonterminal_response_at" => observation["last_nonterminal_response_at"] || "not recorded",
     "controller_terminal_observed_at" => observation["observed_at"] || "not recorded",
     "controller_poll_interval_ms" => observation["poll_interval_ms"] || "not recorded",

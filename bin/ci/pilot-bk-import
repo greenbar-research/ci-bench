@@ -4,8 +4,9 @@
 # an explicit event snapshot from the build env set by bin/ci/pilot-buildkite
 # and uploads the selected workflow through the pinned buildkite-gha runtime.
 #
-# Build env: CI_BENCH_WORKFLOW (pilot.yml or probe.yml), CI_BENCH_EXPECTED_SHA,
-# and for pilot.yml CI_BENCH_PROFILE, CI_BENCH_CACHE_PHASE, CI_BENCH_CACHE_EPOCH.
+# Build env: CI_BENCH_WORKFLOW (pilot.yml, probe.yml, or the native
+# native-pilot.yml / native-probe.yml), CI_BENCH_EXPECTED_SHA, and for the pilot
+# workloads CI_BENCH_PROFILE, CI_BENCH_CACHE_PHASE, CI_BENCH_CACHE_EPOCH.
 set -euo pipefail
 
 version=0.105.1
@@ -21,6 +22,17 @@ sha="${CI_BENCH_EXPECTED_SHA:-}"
   || fail "checkout $(git rev-parse HEAD) / build commit ${BUILDKITE_COMMIT:-unset} do not match $sha"
 
 case "$workflow" in
+  native-probe.yml|native-pilot.yml)
+    # Native Buildkite YAML: same build env, no GHAC translation. Upload
+    # interpolates CI_BENCH_* (for example the cache volume name).
+    if [[ "$workflow" == native-pilot.yml ]]; then
+      [[ "${CI_BENCH_PROFILE:-}" =~ ^(smoke|full)$ ]] || fail "CI_BENCH_PROFILE must be smoke or full"
+      [[ "${CI_BENCH_CACHE_PHASE:-}" =~ ^(cold|warm)$ ]] || fail "CI_BENCH_CACHE_PHASE must be cold or warm"
+      [[ "${CI_BENCH_CACHE_EPOCH:-}" =~ ^[A-Za-z0-9-]{1,64}$ ]] || fail "native CI_BENCH_CACHE_EPOCH allows letters, digits, and hyphens"
+    fi
+    buildkite-agent pipeline upload ".buildkite/$workflow"
+    exit 0
+    ;;
   probe.yml)
     inputs="\"expected_sha\":\"$sha\",\"runner\":\"ubuntu-24.04\""
     ;;
@@ -30,7 +42,7 @@ case "$workflow" in
     [[ "${CI_BENCH_CACHE_EPOCH:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "CI_BENCH_CACHE_EPOCH has unsupported characters"
     inputs="\"profile\":\"$CI_BENCH_PROFILE\",\"cache_phase\":\"$CI_BENCH_CACHE_PHASE\",\"cache_epoch\":\"$CI_BENCH_CACHE_EPOCH\",\"expected_sha\":\"$sha\",\"runner\":\"ubuntu-24.04\""
     ;;
-  *) fail "CI_BENCH_WORKFLOW must be pilot.yml or probe.yml" ;;
+  *) fail "CI_BENCH_WORKFLOW must be pilot.yml, probe.yml, native-pilot.yml, or native-probe.yml" ;;
 esac
 
 work="$(mktemp -d)"

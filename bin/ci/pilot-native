@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Runs the pilot's useful work on providers that execute plain commands
+# instead of GitHub Actions workflows (Buildkite native YAML). It mirrors
+# .github/workflows/probe.yml and pilot.yml step for step, with the same pinned
+# Ruby, Bundler, Node, ImageMagick, system packages, services, and bin/bench
+# commands; keep them in sync.
+#
+#   bin/ci/pilot-native probe
+#   bin/ci/pilot-native pilot   # CI_BENCH_PROFILE, CI_BENCH_CACHE_PHASE, CI_BENCH_CACHE_EPOCH
+#
+# Requires CI_BENCH_EXPECTED_SHA and CI_BENCH_RUNNER. The provider restores and
+# saves vendor/bundle and tmp/ci-bench-cache under a name derived from
+# CI_BENCH_CACHE_EPOCH; a sentinel written after a successful run shows a hit.
+# The agent checks out the commit before this script runs, so the checkout
+# phase is covered only by provider job timing.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+mode="${1:-}"
+sudo=(); [[ "$(id -u)" -eq 0 ]] || sudo=(sudo)
+mkdir -p tmp/pilot
+export CI_BENCH_PHASES="$PWD/tmp/ci-bench-phases.tsv"
+printf '%s\tjob\tstart\n' "$(date -u +%s%3N)" > "$CI_BENCH_PHASES"
+
+collect_and_upload() {
+  local status=$?
+  set +e
+  bin/ci/pilot-mark artifact:start
+  cp "$CI_BENCH_PHASES" tmp/pilot/phases.tsv
+  cp tmp/bench/*.json tmp/bench/*.log tmp/pilot/ 2>/dev/null
+  { git rev-parse HEAD; git status --porcelain; } > tmp/pilot/source.txt
+  (cd tmp/pilot && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+  if command -v buildkite-agent >/dev/null 2>&1; then
+    buildkite-agent artifact upload "tmp/pilot/**/*"
+  fi
+  exit "$status"
+}
+trap collect_and_upload EXIT
+
+export_target() {
+  # pilot-runner records the target in runner.env; bin/bench reads BENCH_TARGET.
+  local target
+  target="$(awk -F= '$1 == "target" { print $2 }' tmp/pilot/runner.env)"
+  export CI_BENCH_TARGET="$target" BENCH_TARGET="$target"
+}
+
+case "$mode" in
+  probe)
+    bin/ci/pilot-mark identity:start
+    bin/ci/pilot-runner
+    bin/ci/pilot-mark identity:end marker:start
+    git rev-parse HEAD > tmp/pilot/marker.txt
+    bin/ci/pilot-mark marker:end
+    ;;
+  pilot)
+    : "${CI_BENCH_PROFILE:?}" "${CI_BENCH_CACHE_PHASE:?}" "${CI_BENCH_CACHE_EPOCH:?}"
+    export BUNDLE_PATH=vendor/bundle BUNDLE_DEPLOYMENT=true
+    export NPM_CONFIG_CACHE="$PWD/tmp/ci-bench-cache/npm" PLAYWRIGHT_BROWSERS_PATH="$PWD/tmp/ci-bench-cache/ms-playwright"
+    bin/ci/pilot-mark identity:start
+    bin/ci/pilot-runner
+    export_target
+    bin/ci/pilot-mark identity:end cache:start
+
+    lock_hash="$(cat Gemfile.lock package-lock.json | sha256sum | cut -c1-64)"
+    cache_key="ci-bench-pilot-${CI_BENCH_CACHE_EPOCH}-${CI_BENCH_PROFILE}-${CI_BENCH_RUNNER}-Linux-${lock_hash}"
+    sentinel=tmp/ci-bench-cache/key
+    cache_hit=false
+    [[ -f "$sentinel" && "$(cat "$sentinel")" == "$cache_key" ]] && cache_hit=true
+    { echo "cache_key=$cache_key"; echo "cache_hit=$cache_hit"; } > tmp/pilot/cache.env
+    if [[ "$CI_BENCH_CACHE_PHASE" == cold && "$cache_hit" == true ]]; then
+      echo "cache_expectation=violated: cold run restored an existing entry" >> tmp/pilot/cache.env
+      echo "cold run restored an existing cache entry; use a new cache_epoch" >&2
+      exit 1
+    fi
+    if [[ "$CI_BENCH_CACHE_PHASE" == warm && "$cache_hit" != true ]]; then
+      echo "cache_expectation=violated: warm run missed the cache" >> tmp/pilot/cache.env
+      echo "warm run did not restore the cold run's cache entry" >&2
+      exit 1
+    fi
+    echo "cache_expectation=met" >> tmp/pilot/cache.env
+    bin/ci/pilot-mark cache:end setup:start
+
+    # Same prebuilt Ruby that ruby/setup-ruby 1.331.0 installs on ubuntu-24.04 x64.
+    ruby_root=/opt/hostedtoolcache/Ruby/3.4.10
+    curl --fail --location --silent --show-error --output /tmp/ruby.tar.gz \
+      https://github.com/ruby/ruby-builder/releases/download/ruby-3.4.10/ruby-3.4.10-ubuntu-24.04-x64.tar.gz
+    echo "2a16c29b57203754da3fcb0c25d9dd7f7340e858f46f835bef32feef348ebc93  /tmp/ruby.tar.gz" | sha256sum --check
+    "${sudo[@]}" mkdir -p "$ruby_root"
+    "${sudo[@]}" tar -xz -C "$ruby_root" -f /tmp/ruby.tar.gz
+    export PATH="$ruby_root/x64/bin:$PATH"
+    ruby --version
+    "${sudo[@]}" env PATH="$PATH" gem install bundler -v 4.0.9 --no-document
+    # Same Node release that actions/setup-node 6.5.0 installs.
+    node_root=/opt/hostedtoolcache/node/24.18.0/x64
+    curl --fail --location --silent --show-error --output /tmp/node.tar.xz \
+      https://nodejs.org/dist/v24.18.0/node-v24.18.0-linux-x64.tar.xz
+    echo "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742  /tmp/node.tar.xz" | sha256sum --check
+    "${sudo[@]}" mkdir -p "$node_root"
+    "${sudo[@]}" tar -xJ -C "$node_root" --strip-components=1 -f /tmp/node.tar.xz
+    export PATH="$node_root/bin:$PATH"
+    node --version
+
+    bin/ci/pilot-system-deps
+
+    version=7.1.2-29
+    archive="ImageMagick-${version}-gcc-x86_64.AppImage"
+    curl --fail --location --silent --show-error \
+      "https://github.com/ImageMagick/ImageMagick/releases/download/${version}/${archive}" \
+      --output "/tmp/${archive}"
+    echo "d43978debd8c25b12c26e368f93de827a8dc45fd13396126ae9b758cd3570485  /tmp/${archive}" \
+      | sha256sum --check
+    chmod +x "/tmp/${archive}"
+    rm -rf /tmp/imagemagick && mkdir /tmp/imagemagick
+    (cd /tmp/imagemagick && "/tmp/${archive}" --appimage-extract >/dev/null)
+    "${sudo[@]}" rm -rf /opt/ci-bench-imagemagick
+    "${sudo[@]}" mv /tmp/imagemagick/squashfs-root /opt/ci-bench-imagemagick
+    "${sudo[@]}" ln --symbolic --force /opt/ci-bench-imagemagick/AppRun /usr/local/bin/magick
+    magick -version
+    bin/ci/pilot-mark setup:end
+
+    bin/ci/pilot-mark dependencies:start
+    bundle install --jobs 4
+    npm ci
+    npx playwright install --with-deps chromium
+    bin/ci/pilot-mark dependencies:end
+
+    bin/ci/pilot-mark services:start
+    bin/ci/services
+    RAILS_ENV=test bin/rails db:prepare
+    bin/ci/pilot-mark services:end
+
+    bin/ci/pilot-mark workload:start
+    bin/bench doctor --profile "$CI_BENCH_PROFILE" 2>&1 | tee tmp/pilot/bench.log
+    bin/bench run --profile "$CI_BENCH_PROFILE" --output tmp/pilot/result.json 2>&1 | tee -a tmp/pilot/bench.log
+    bin/ci/pilot-mark workload:end
+
+    # Only a successful job commits the provider cache, so a later warm run can
+    # trust this sentinel.
+    mkdir -p tmp/ci-bench-cache
+    echo "$cache_key" > "$sentinel"
+    ;;
+  *)
+    echo "usage: bin/ci/pilot-native probe|pilot" >&2
+    exit 2
+    ;;
+esac

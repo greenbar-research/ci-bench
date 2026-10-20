@@ -28,7 +28,8 @@ capture() {
 # environment. GitHub-hosted jobs report github-hosted. Buildkite GitHub Actions
 # compatibility jobs report self-hosted, and their step environment is an
 # allowlist without BUILDKITE_* variables, so the agent binary identifies the
-# host. Runner providers report self-hosted under their own labels.
+# host. Runner providers report self-hosted under their own labels. Native
+# Buildkite steps set CI_BENCH_RUNNER=buildkite-native and have no runner env.
 label="${CI_BENCH_RUNNER:-ubuntu-24.04}"
 fact runner_label "$label"
 case "${RUNNER_ENVIRONMENT:-}:$label" in
@@ -39,6 +40,9 @@ case "${RUNNER_ENVIRONMENT:-}:$label" in
   self-hosted:blacksmith-*) target=blacksmith ;;
   self-hosted:depot-*) target=depot ;;
   self-hosted:namespace-*|self-hosted:nscloud-*) target=namespace ;;
+  :buildkite-native)
+    if [[ "${BUILDKITE:-}" == true ]]; then target=buildkite-native; else target=unknown; fi
+    ;;
   *) target=unknown ;;
 esac
 [[ "$target" == unknown ]] && failures+=("target provider could not be identified")

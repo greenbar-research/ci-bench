@@ -50,6 +50,8 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal 12_000, valid.dig("timeline", "provider_job_ms")
     assert_match(/\ABuildkite /, valid.dig("timeline", "clock_note").split("provider times use ").last)
     assert_equal "2026-10-20T00:00:21Z", valid.dig("timeline", "provider_terminal_boundary", "build_finished_at")
+    assert_match(/Buildkite-clock workload job finished_at/, valid.dig("timeline", "controller_accept_to_job_completed_note"))
+    refute_match(/GitHub/, valid.dig("timeline", "controller_accept_to_job_completed_note"))
     assert_match(/\Abenchmark-cold: .*GHAC toolchain volume present/, valid.fetch("cold_qualification"))
 
     extra = provenance(buildkite: { "extra_jobs" => [{ "step_key" => "gha-other", "state" => "passed" }] }, volumes: [])
@@ -63,6 +65,18 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal "missing: cache volumes present before the build: ci-bench/container-cache", cached.fetch("cold_qualification")
   end
 
+  def test_buildkite_native_uses_pipeline_steps_for_graph_parity
+    valid = provenance(buildkite: { "native" => true }, volumes: [{ "tag" => "buildkite-local-builder-greenbar-research-ci-bench" }])
+    assert_equal [], valid.fetch("invalid_reasons")
+    assert_equal "buildkite-native", valid.fetch("target")
+    assert_equal ".buildkite/native-pilot.yml", valid.dig("comparison_group", "workflow_path")
+    assert_equal ["native-pilot"], valid.dig("graph", "workflow_logical_jobs")
+    assert_match(/\Amissing: cache volumes present before the build: buildkite-local-builder/, valid.fetch("cold_qualification"))
+
+    ghac_step = provenance(buildkite: { "native" => true, "workload_key" => "gha-pilot" }, volumes: [])
+    assert_equal 1, ghac_step.fetch("invalid_reasons").grep(/job graph parity failed/).size
+  end
+
   private
 
   def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil)
@@ -72,10 +86,13 @@ class PilotProvenanceTest < Minitest::Test
       controller = { "trigger_requested_at" => "2026-10-20T00:00:01.500Z", "trigger_accepted_at" => "2026-10-20T00:00:02.000Z",
                      "inputs" => { "profile" => "smoke", "cache_phase" => "cold", "expected_sha" => SHA } }
       controller = controller.merge("profile" => "probe", "inputs" => { "expected_sha" => SHA }, "terminal_observation" => observation) if probe
-      controller = controller.merge("target" => "buildkite-ghac", "provider_cache_volumes_before" => volumes) if buildkite
+      target = buildkite&.fetch("native", false) ? "buildkite-native" : "buildkite-ghac"
+      controller = controller.merge("target" => target, "provider_cache_volumes_before" => volumes) if buildkite
+      controller = controller.merge("workflow" => "native-pilot.yml") if buildkite&.fetch("native", false)
       write_json(dir, "controller.json", controller)
       if buildkite
-        workload = { "step_key" => "gha-pilot", "state" => "passed", "retried" => buildkite["retried"] || false,
+        workload_key = buildkite["workload_key"] || (buildkite["native"] ? "native-pilot" : "gha-pilot")
+        workload = { "step_key" => workload_key, "state" => "passed", "retried" => buildkite["retried"] || false,
                      "runnable_at" => "2026-10-20T00:00:05Z", "started_at" => "2026-10-20T00:00:08Z", "finished_at" => "2026-10-20T00:00:20Z" }
         write_json(dir, "build.json", { "number" => 1, "state" => "passed", "commit" => SHA, "created_at" => "2026-10-20T00:00:02Z",
                                         "started_at" => "2026-10-20T00:00:03Z", "finished_at" => "2026-10-20T00:00:21Z",
@@ -91,7 +108,7 @@ class PilotProvenanceTest < Minitest::Test
           { "status" => "passed", "git_dirty" => false, "verification" => { "digest" => digest }, "workloads" => [] })
         File.write(File.join(dir, "artifact/cache.env"), "cache_expectation=met\n")
       end
-      runner_env = { "target" => buildkite ? "buildkite-ghac" : "github-actions", "envelope_match" => "true", "checkout_sha" => SHA,
+      runner_env = { "target" => buildkite ? target : "github-actions", "envelope_match" => "true", "checkout_sha" => SHA,
                      "docker_endpoint" => "unix:///var/run/docker.sock", "docker_builder" => "docker" }.merge(runner)
       File.write(File.join(dir, "artifact/runner.env"), runner_env.map { |k, v| "#{k}=#{v}\n" }.join)
       File.write(File.join(dir, "artifact-checksums.txt"), "verified\n")
