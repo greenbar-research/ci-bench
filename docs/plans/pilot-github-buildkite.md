@@ -368,9 +368,14 @@ qualification `missing` while that volume exists.
     minute limit;
   - GitHub: 0.8 s, under 5,000 per hour.
 
-  Every HTTP attempt passes through the lock, including retries. Read-only
-  Buildkite requests retry 429s, 5xx, and connection failures after
-  Retry-After. Pollers sleep 5 s between polls.
+  Every HTTP attempt passes through the lock, including retries. A read
+  succeeds only when curl exits 0 and the status is 2xx. Transport failures,
+  429s, and 5xx are retried after Retry-After; transport failures include a
+  truncated body or a timeout after a 200 status line. A create with a
+  transport failure is reconciled even after a 201 status line. Pollers
+  sleep 5 s between polls. The recorded limiter delay runs from before the
+  lock wait to its release, so it includes time blocked behind other
+  callers.
 - **Client delay is separated from provider time.** Each record has:
   - `controller_call_started_at`;
   - `trigger_requested_at`, taken before the limiter wait;

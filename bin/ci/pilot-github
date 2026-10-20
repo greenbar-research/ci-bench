@@ -22,21 +22,22 @@ iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 # throttle NAME MIN_MS: spaces every HTTP attempt to one API, including
 # retries, across all controllers on this host (lock and timestamp under
 # TMPDIR), bounding the aggregate rate. When CI_BENCH_LIMITER_LOG is set, each
-# call appends the milliseconds it waited, so records can separate client-side
-# delay from provider time.
+# call appends its elapsed client-side delay in milliseconds, from before
+# waiting for the lock until its release, so records can separate that delay
+# from provider time.
 throttle() {
-  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now waited=0
+  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now started
+  started="$(date +%s%3N)"
   exec {fd}>>"$file.lock"
   flock "$fd"
   last="$(cat "$file" 2>/dev/null || echo 0)"
   now="$(date +%s%3N)"
   if (( now - last < min_ms )); then
-    waited=$((min_ms - now + last))
-    sleep "$(awk -v ms="$waited" 'BEGIN { print ms / 1000 }')"
+    sleep "$(awk -v ms="$((min_ms - now + last))" 'BEGIN { print ms / 1000 }')"
   fi
   date +%s%3N > "$file"
   exec {fd}>&-
-  if [[ -n "${CI_BENCH_LIMITER_LOG:-}" ]]; then echo "$waited" >> "$CI_BENCH_LIMITER_LOG"; fi
+  if [[ -n "${CI_BENCH_LIMITER_LOG:-}" ]]; then echo "$(( $(date +%s%3N) - started ))" >> "$CI_BENCH_LIMITER_LOG"; fi
 }
 
 # limiter_summary FILE: total wait and attempt count logged by throttle.

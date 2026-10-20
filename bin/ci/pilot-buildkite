@@ -26,21 +26,22 @@ iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 # throttle NAME MIN_MS: spaces every HTTP attempt to one API, including
 # retries, across all controllers on this host (lock and timestamp under
 # TMPDIR), bounding the aggregate rate. When CI_BENCH_LIMITER_LOG is set, each
-# call appends the milliseconds it waited, so records can separate client-side
-# delay from provider time.
+# call appends its elapsed client-side delay in milliseconds, from before
+# waiting for the lock until its release, so records can separate that delay
+# from provider time.
 throttle() {
-  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now waited=0
+  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now started
+  started="$(date +%s%3N)"
   exec {fd}>>"$file.lock"
   flock "$fd"
   last="$(cat "$file" 2>/dev/null || echo 0)"
   now="$(date +%s%3N)"
   if (( now - last < min_ms )); then
-    waited=$((min_ms - now + last))
-    sleep "$(awk -v ms="$waited" 'BEGIN { print ms / 1000 }')"
+    sleep "$(awk -v ms="$((min_ms - now + last))" 'BEGIN { print ms / 1000 }')"
   fi
   date +%s%3N > "$file"
   exec {fd}>&-
-  if [[ -n "${CI_BENCH_LIMITER_LOG:-}" ]]; then echo "$waited" >> "$CI_BENCH_LIMITER_LOG"; fi
+  if [[ -n "${CI_BENCH_LIMITER_LOG:-}" ]]; then echo "$(( $(date +%s%3N) - started ))" >> "$CI_BENCH_LIMITER_LOG"; fi
 }
 
 # limiter_summary FILE: total wait and attempt count logged by throttle.
@@ -75,29 +76,32 @@ verify_pilot_tag() {
 
 # bk URL [OUTPUT_FILE]: authenticated read-only GET to OUTPUT_FILE or stdout;
 # the header is read from stdin. Buildkite allows 50 REST requests per user
-# per minute. Every attempt, including retries of 429, 5xx, and connection
-# failures, passes through the shared 1.3 s limiter, and retries wait for
-# Retry-After (10 s by default). Only idempotent reads go through bk; builds
-# are created with bk_create.
+# per minute. A read succeeds only when curl exits 0 and the final status is
+# 2xx; transport failures (for example a truncated body or a timeout, even
+# after a 200 status line), 429, and 5xx are retried. Every attempt passes
+# through the shared 1.3 s limiter, and retries wait for Retry-After (10 s by
+# default). Only idempotent reads go through bk; builds are created with
+# bk_create.
 bk() {
-  local url="$1" output="${2:-}" out headers code="" wait attempt
+  local url="$1" output="${2:-}" out headers code="" rc wait attempt
   : "${BUILDKITE_API_TOKEN:?BUILDKITE_API_TOKEN is not loaded}"
   out="$(mktemp)" headers="$(mktemp)"
   for attempt in 1 2 3 4 5 6 7 8; do
     throttle buildkite 1300
-    code="$(curl --silent --show-error --location --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - "$url" \
-      <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\"" || true)"
-    if [[ "$code" == 2?? ]]; then
+    if code="$(curl --silent --show-error --location --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
+      --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - "$url" \
+      <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\"")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 && "$code" == 2?? ]]; then
       if [[ -n "$output" ]]; then mv "$out" "$output"; else cat "$out"; rm -f "$out"; fi
       rm -f "$headers"
       return 0
     fi
-    [[ "$code" == 429 || "$code" == 5?? || "$code" == 000 || -z "$code" ]] || break
+    [[ "$rc" != 0 || "$code" == 429 || "$code" == 5?? ]] || break
     wait="$(awk -F': *' 'tolower($1) == "retry-after" { v = $2 + 0 } END { print v + 0 }' "$headers")"
     sleep "$(( wait > 0 ? wait : 10 ))"
   done
   rm -f "$out" "$headers"
-  echo "GET ${url%%\?*} failed with HTTP ${code:-none}" >&2
+  echo "GET ${url%%\?*} failed with HTTP ${code:-none}, curl exit ${rc:-none}" >&2
   return 1
 }
 
@@ -108,25 +112,28 @@ bk() {
 # may follow acceptance, so the build is looked up by its CI_BENCH_REQUEST_ID
 # env instead of posting again.
 bk_create() {
-  local body="$1" sha="$2" request_id="$3" state="$4" out headers code="" wait attempt
+  local body="$1" sha="$2" request_id="$3" state="$4" out headers code="" rc wait attempt
   out="$(mktemp)" headers="$(mktemp)"
   for attempt in 1 2 3 4 5; do
     throttle buildkite 1300
     if [[ "$attempt" == 1 ]]; then iso_now > "$state/first_send_at"; fi
-    code="$(curl --silent --show-error --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - \
+    if code="$(curl --silent --show-error --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
+      --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - \
       -X POST -H 'Content-Type: application/json' --data-binary "@$body" "$api/pipelines/$pipeline/builds" \
-      <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\"" || true)"
-    if [[ "$code" == 201 ]]; then
+      <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\"")"; then rc=0; else rc=$?; fi
+    # A transport failure is ambiguous even after a 201 status line, so it is
+    # reconciled rather than retried or trusted.
+    if [[ "$rc" == 0 && "$code" == 201 ]]; then
       cat "$out"
       rm -f "$out" "$headers"
       return 0
     fi
-    [[ "$code" == 429 ]] || break
+    [[ "$rc" == 0 && "$code" == 429 ]] || break
     wait="$(awk -F': *' 'tolower($1) == "retry-after" { print $2 + 0 }' "$headers")"
     sleep "${wait:-30}"
   done
   rm -f "$out" "$headers"
-  echo "build create returned HTTP ${code:-none}; reconciling by request ID $request_id" >&2
+  echo "build create returned HTTP ${code:-none}, curl exit ${rc:-none}; reconciling by request ID $request_id" >&2
   sleep 10
   local builds match
   if ! builds="$(bk "$api/pipelines/$pipeline/builds?commit=$sha&per_page=30")"; then
