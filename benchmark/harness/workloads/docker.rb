@@ -19,6 +19,7 @@ application_output = nil
 health_status = nil
 health_body = nil
 peak_docker_disk_bytes = 0
+disk_sample_retries = 0
 
 unless parameters.fetch("minimum_layer_count").positive? && parameters.fetch("health_timeout_seconds").positive?
   raise "docker workload parameters must be positive"
@@ -54,14 +55,33 @@ non_negative_integer = lambda do |value, label|
 
   value
 end
-docker_disk_bytes = lambda do
-  payload = JSON.parse(
-    capture_bang.call(
-      "curl", "--fail", "--silent", "--show-error",
+# The daemon can answer /system/df with a transient 5xx while a build changes
+# its cache (one sample in a Buildkite GHAC warm run). A sample is retried up
+# to four times; retries are counted in telemetry, and a persistent failure
+# raises with the daemon's status and message.
+disk_sample_lock = Mutex.new
+docker_disk_payload = lambda do
+  last_failure = nil
+  5.times do |attempt|
+    if attempt.positive?
+      disk_sample_lock.synchronize { disk_sample_retries += 1 }
+      sleep 0.5
+    end
+    stdout, stderr, status = capture.call(
+      "curl", "--silent", "--show-error", "--write-out", "\n%{http_code}",
       "--unix-socket", docker_socket,
       "http://localhost/v1.41/system/df"
     )
-  )
+    body, _, code = stdout.rpartition("\n")
+    return JSON.parse(body) if status.success? && code == "200"
+
+    last_failure = "HTTP #{code.empty? ? "none" : code}: #{(body.empty? ? stderr : body).strip[0, 500]}"
+    break unless !status.success? || code.start_with?("5")
+  end
+  raise "Docker /system/df failed: #{last_failure}"
+end
+docker_disk_bytes = lambda do
+  payload = docker_disk_payload.call
   builder_bytes = payload.fetch("BuildCache").reject { |item| item.fetch("Shared") }.sum do |item|
     non_negative_integer.call(item.fetch("Size"), "build cache Size")
   end
@@ -303,7 +323,8 @@ File.write(
       "image_id" => image_metadata.fetch("Id"),
       "layer_count" => image_metadata.dig("RootFS", "Layers").length,
       "peak_benchmark_disk_bytes" => peak_docker_disk_bytes,
-      "phase_duration_ms" => phase_durations
+      "phase_duration_ms" => phase_durations,
+      "disk_sample_retries" => disk_sample_retries
     }
   ) << "\n"
 )
