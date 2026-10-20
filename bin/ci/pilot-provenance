@@ -138,7 +138,10 @@ logical_jobs = begin
   require "yaml"
   definition = YAML.safe_load(`git -C #{repo_root} show #{expected_sha}:#{workflow_path} 2>/dev/null`)
   if native then definition.fetch("steps").map { |step| step.fetch("key") }
-  elsif circle then definition.fetch("workflows").fetch(probe ? "probe" : "pilot").fetch("jobs")
+  elsif circle
+    # A workflow job entry is a name, or a one-key map when it has options such
+    # as filters.
+    definition.fetch("workflows").fetch(probe ? "probe" : "pilot").fetch("jobs").map { |job| job.is_a?(Hash) ? job.keys.first : job }
   else definition.fetch("jobs").keys
   end
 rescue StandardError
@@ -368,6 +371,13 @@ record = {
   "phases" => phases,
   "provider_steps" => steps,
   "runner" => runner,
+  # CircleCI machine images expose no image env; the machine agent names the
+  # resolved image in the "Spin up environment" step log, which pins what a
+  # mutable tag such as ubuntu-2404:current pointed to for this job.
+  "circleci_resolved_machine_image" => if circle
+    Dir.glob(File.join(dir, "logs", "step-*.txt")).sort.lazy
+      .filter_map { |f| File.read(f)[/machine-agent version \S+ \(image: "([^"]+)"/, 1] }.first || "unknown"
+  end,
   "cache" => probe ? { "benchmark_cache" => "not used by the probe" } : cache.merge(
     "provider_owned_unknowns" => [
       "runner image tool cache contents",
