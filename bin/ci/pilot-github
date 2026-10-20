@@ -19,6 +19,43 @@ cd "$(dirname "$0")/../.."
 repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 
+# throttle NAME MIN_MS: spaces requests to one API across every controller on
+# this host (lock and timestamp under TMPDIR), bounding the aggregate rate.
+throttle() {
+  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now
+  exec {fd}>>"$file.lock"
+  flock "$fd"
+  last="$(cat "$file" 2>/dev/null || echo 0)"
+  now="$(date +%s%3N)"
+  if (( now - last < min_ms )); then sleep "$(awk -v ms="$((min_ms - now + last))" 'BEGIN { print ms / 1000 }')"; fi
+  date +%s%3N > "$file"
+  exec {fd}>&-
+}
+
+# GitHub allows 5,000 REST requests per hour; 800 ms spacing keeps all
+# controllers together under 4,500.
+ghapi() { throttle github 800; gh api "$@"; }
+
+# Revision of the controller code that started this run. A running Bash
+# controller keeps the definitions it started with, so this can differ from
+# both the measured SHA and a later collector.
+controller_revision() {
+  jq -n --arg sha "$(git rev-parse HEAD)" --argjson dirty "$([[ -z "$(git status --porcelain -- bin/ci)" ]] && echo false || echo true)" \
+    '{sha: $sha, bin_ci_dirty: $dirty}'
+}
+
+# verify_pilot_tag SHA: the measured commit is dispatched through the
+# immutable lightweight tag pilot/SHA, so later collector-only pushes to main
+# never change what a run or a cold/warm pair measures.
+verify_pilot_tag() {
+  local sha="$1" object
+  object="$(ghapi "repos/$repo/git/ref/tags/pilot/$sha" --jq '"\(.object.type) \(.object.sha)"' 2>/dev/null || true)"
+  if [[ "$object" != "commit $sha" ]]; then
+    echo "tag pilot/$sha does not name commit $sha; refusing" >&2
+    exit 1
+  fi
+}
+
 dispatch() {
   local profile="$1" phase="$2" epoch="$3" sha="$4" runner="${5:-ubuntu-24.04}"
   run_workflow pilot.yml "$sha" "$profile" \
@@ -31,16 +68,11 @@ probe() {
   run_workflow probe.yml "$sha" probe "$(jq -n --arg sha "$sha" --arg runner "$runner" '{expected_sha: $sha, runner: $runner}')"
 }
 
-# run_workflow WORKFLOW SHA PROFILE INPUTS_JSON: dispatches, polls every 2 s to
+# run_workflow WORKFLOW SHA PROFILE INPUTS_JSON: dispatches, polls every 5 s to
 # the controller's first terminal observation on the orb clock, then collects.
 run_workflow() {
-  local workflow="$1" sha="$2" profile="$3" inputs="$4" poll_interval_ms=2000
-  local remote_sha
-  remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
-  if [[ "$remote_sha" != "$sha" ]]; then
-    echo "origin main is $remote_sha, not expected $sha; refusing to dispatch" >&2
-    exit 1
-  fi
+  local workflow="$1" sha="$2" profile="$3" inputs="$4" poll_interval_ms=5000
+  verify_pilot_tag "$sha"
   local body requested_at response accepted_at run_id dir status last_pending_at observed_at polls=0 target
   case "$(jq -r .runner <<<"$inputs")" in
     ubuntu-24.04) target=github-actions ;;
@@ -49,16 +81,18 @@ run_workflow() {
     namespace-*|nscloud-*) target=namespace ;;
     *) echo "unsupported runner label" >&2; exit 2 ;;
   esac
-  body="$(jq -n --argjson inputs "$inputs" '{ref: "main", return_run_details: true, inputs: $inputs}')"
+  body="$(jq -n --arg ref "pilot/$sha" --argjson inputs "$inputs" '{ref: $ref, return_run_details: true, inputs: $inputs}')"
   requested_at="$(iso_now)"
-  response="$(gh api --method POST "repos/$repo/actions/workflows/$workflow/dispatches" --input - <<<"$body")"
+  response="$(ghapi --method POST "repos/$repo/actions/workflows/$workflow/dispatches" --input - <<<"$body")"
   accepted_at="$(iso_now)"
   run_id="$(jq -r .workflow_run_id <<<"$response")"
   dir="tmp/pilot-evidence/$run_id"
   mkdir -p "$dir"
   jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg workflow "$workflow" \
     --arg profile "$profile" --arg target "$target" --argjson inputs "$inputs" --argjson response "$response" \
-    '{controller_clock: "orb UTC", target: $target, workflow: $workflow, profile: $profile,
+    --argjson controller_revision "$(controller_revision)" --argjson poll_interval_ms "$poll_interval_ms" \
+    '{controller_clock: "orb UTC", controller_revision: $controller_revision, poll_interval_ms: $poll_interval_ms,
+      dispatch_ref: ("pilot/" + $inputs.expected_sha), target: $target, workflow: $workflow, profile: $profile,
       trigger_requested_at: $requested_at, trigger_accepted_at: $accepted_at,
       inputs: $inputs, dispatch_response: $response}' > "$dir/controller.json"
   jq -r '"\(.workflow_run_id) \(.html_url)"' <<<"$response"
@@ -67,7 +101,7 @@ run_workflow() {
   last_pending_at="$accepted_at"
   while :; do
     polls=$((polls + 1))
-    status="$(gh api "repos/$repo/actions/runs/$run_id" --jq .status || echo poll-error)"
+    status="$(ghapi "repos/$repo/actions/runs/$run_id" --jq .status || echo poll-error)"
     if [[ "$status" == completed ]]; then
       observed_at="$(iso_now)"
       break
@@ -97,10 +131,10 @@ collect() {
   mkdir -p "$dir"
   local observed_at
   observed_at="$(iso_now)"
-  gh api "repos/$repo/actions/runs/$run_id" > "$dir/run.json"
-  gh api "repos/$repo/actions/runs/$run_id/jobs?filter=all" > "$dir/jobs.json"
-  gh api "repos/$repo/actions/runs/$run_id/artifacts" > "$dir/artifacts.json"
-  gh api "repos/$repo/actions/runs/$run_id/logs" > "$dir/logs.zip" 2>/dev/null || rm -f "$dir/logs.zip"
+  ghapi "repos/$repo/actions/runs/$run_id" > "$dir/run.json"
+  ghapi "repos/$repo/actions/runs/$run_id/jobs?filter=all" > "$dir/jobs.json"
+  ghapi "repos/$repo/actions/runs/$run_id/artifacts" > "$dir/artifacts.json"
+  ghapi "repos/$repo/actions/runs/$run_id/logs" > "$dir/logs.zip" 2>/dev/null || rm -f "$dir/logs.zip"
   if [[ -f "$dir/logs.zip" ]]; then
     rm -rf "$dir/logs"
     mkdir -p "$dir/logs"

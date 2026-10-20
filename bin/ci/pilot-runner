@@ -38,7 +38,12 @@ case "${RUNNER_ENVIRONMENT:-}:$label" in
     if command -v buildkite-agent >/dev/null 2>&1; then target=buildkite-ghac; else target=unknown; fi
     ;;
   self-hosted:blacksmith-*) target=blacksmith ;;
-  self-hosted:depot-*) target=depot ;;
+  *:depot-*)
+    # Depot CI sets DEPOT_JOB_URL; Depot's GitHub Actions runners do not.
+    if [[ -n "${DEPOT_JOB_URL:-}" ]]; then target=depot-ci
+    elif [[ "${RUNNER_ENVIRONMENT:-}" == self-hosted ]]; then target=depot
+    else target=unknown; fi
+    ;;
   self-hosted:namespace-*|self-hosted:nscloud-*) target=namespace ;;
   :buildkite-native)
     if [[ "${BUILDKITE:-}" == true ]]; then target=buildkite-native; else target=unknown; fi
@@ -87,6 +92,7 @@ fact image_os "${ImageOS:-unknown}"
 fact image_version "${ImageVersion:-unknown}"
 fact runner_name "${RUNNER_NAME:-unknown}"
 fact runner_environment "${RUNNER_ENVIRONMENT:-unknown}"
+fact depot_job_url "${DEPOT_JOB_URL:-none}"
 capture uname uname -a
 capture os-release cat /etc/os-release
 capture lscpu lscpu

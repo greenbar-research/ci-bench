@@ -1,0 +1,184 @@
+name: Unscored provider pilot
+
+# One serial job per dispatch. The same file is the eventual Buildkite GitHub
+# Actions compatibility input; see docs/plans/pilot-github-buildkite.md.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: smoke (smoke/setup baseline) or full (serial Rails workload)
+        required: true
+        type: choice
+        options:
+          - smoke
+          - full
+      cache_phase:
+        description: cold requires a cache miss; warm requires an exact hit from a successful cold run
+        required: true
+        type: choice
+        options:
+          - cold
+          - warm
+      cache_epoch:
+        description: Benchmark cache epoch; use a new value for each cold run
+        required: true
+        type: string
+      expected_sha:
+        description: Full commit SHA the dispatched ref must resolve to
+        required: true
+        type: string
+      runner:
+        description: runs-on label; ubuntu-24.04 for GitHub-hosted and Buildkite GHAC, or a provider's 4 vCPU / 16 GB Ubuntu 24.04 label
+        required: false
+        default: ubuntu-24.04
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-bench-pilot-${{ inputs.runner }}
+  cancel-in-progress: false
+
+jobs:
+  pilot:
+    name: Pilot ${{ inputs.profile }} ${{ inputs.cache_phase }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 50
+    env:
+      CI_BENCH_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      CI_BENCH_RUNNER: ${{ inputs.runner }}
+      CI_BENCH_PROFILE: ${{ inputs.profile }}
+      CI_BENCH_CACHE_PHASE: ${{ inputs.cache_phase }}
+      CI_BENCH_CACHE_EPOCH: ${{ inputs.cache_epoch }}
+      # Keep Docker builds on the job host on every target (see the pilot plan).
+      BUILDX_BUILDER: default
+      BUNDLE_PATH: vendor/bundle
+      BUNDLE_DEPLOYMENT: "true"
+
+    steps:
+      - name: Mark job start
+        shell: bash
+        run: |
+          phases="$RUNNER_TEMP/ci-bench-phases.tsv"
+          echo "CI_BENCH_PHASES=$phases" >> "$GITHUB_ENV"
+          now="$(date -u +%s%3N)"
+          printf '%s\tjob\tstart\n%s\tcheckout\tstart\n' "$now" "$now" > "$phases"
+
+      - name: Check out dispatched revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Verify source and runner envelope
+        run: |
+          bin/ci/pilot-mark checkout:end
+          bin/ci/pilot-runner
+          bin/ci/pilot-mark cache:start
+
+      - name: Restore benchmark cache
+        id: deps-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          key: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+          path: |
+            vendor/bundle
+            ~/.npm
+            ~/.cache/ms-playwright
+
+      - name: Check cache expectation
+        env:
+          CACHE_HIT: ${{ steps.deps-cache.outputs.cache-hit }}
+          CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+        run: |
+          bin/ci/pilot-mark cache:end setup:start
+          {
+            echo "cache_key=${CACHE_KEY}"
+            echo "cache_hit=${CACHE_HIT:-false}"
+          } > tmp/pilot/cache.env
+          if [[ "$CI_BENCH_CACHE_PHASE" == cold && "$CACHE_HIT" == true ]]; then
+            echo "cache_expectation=violated: cold run restored an existing entry" >> tmp/pilot/cache.env
+            echo "cold run restored an existing cache entry; use a new cache_epoch" >&2
+            exit 1
+          fi
+          if [[ "$CI_BENCH_CACHE_PHASE" == warm && "$CACHE_HIT" != true ]]; then
+            echo "cache_expectation=violated: warm run missed the cache" >> tmp/pilot/cache.env
+            echo "warm run did not restore the cold run's cache entry" >&2
+            exit 1
+          fi
+          echo "cache_expectation=met" >> tmp/pilot/cache.env
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
+        with:
+          ruby-version: 3.4.10
+          bundler-cache: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24.18.0
+
+      - name: Install missing system packages
+        run: bin/ci/pilot-system-deps
+
+      - name: Install pinned ImageMagick
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=7.1.2-29
+          archive="ImageMagick-${version}-gcc-x86_64.AppImage"
+          curl --fail --location --silent --show-error \
+            "https://github.com/ImageMagick/ImageMagick/releases/download/${version}/${archive}" \
+            --output "/tmp/${archive}"
+          echo "d43978debd8c25b12c26e368f93de827a8dc45fd13396126ae9b758cd3570485  /tmp/${archive}" \
+            | sha256sum --check
+          chmod +x "/tmp/${archive}"
+          mkdir /tmp/imagemagick
+          cd /tmp/imagemagick
+          "/tmp/${archive}" --appimage-extract >/dev/null
+          sudo mv squashfs-root /opt/ci-bench-imagemagick
+          sudo ln --symbolic /opt/ci-bench-imagemagick/AppRun /usr/local/bin/magick
+          magick -version
+          cd "$GITHUB_WORKSPACE"
+          bin/ci/pilot-mark setup:end
+
+      - name: Install dependencies
+        run: |
+          bin/ci/pilot-mark dependencies:start
+          bundle install --jobs 4
+          npm ci
+          npx playwright install --with-deps chromium
+          bin/ci/pilot-mark dependencies:end
+
+      - name: Start services
+        run: |
+          bin/ci/pilot-mark services:start
+          bin/ci/services
+          RAILS_ENV=test bin/rails db:prepare
+          bin/ci/pilot-mark services:end
+
+      - name: Run unscored workload
+        run: |
+          set -o pipefail
+          bin/ci/pilot-mark workload:start
+          bin/bench doctor --profile "$CI_BENCH_PROFILE" 2>&1 | tee tmp/pilot/bench.log
+          bin/bench run --profile "$CI_BENCH_PROFILE" --output tmp/pilot/result.json 2>&1 | tee -a tmp/pilot/bench.log
+          bin/ci/pilot-mark workload:end
+
+      - name: Collect in-job evidence
+        if: ${{ always() }}
+        run: |
+          bin/ci/pilot-mark artifact:start
+          mkdir -p tmp/pilot
+          cp "$CI_BENCH_PHASES" tmp/pilot/phases.tsv || true
+          cp tmp/bench/*.json tmp/bench/*.log tmp/pilot/ 2>/dev/null || true
+          { git rev-parse HEAD; git status --porcelain; } > tmp/pilot/source.txt
+          (cd tmp/pilot && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+
+      - name: Upload pilot evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pilot-${{ inputs.profile }}-${{ inputs.cache_phase }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: tmp/pilot/

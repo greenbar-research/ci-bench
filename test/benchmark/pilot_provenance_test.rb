@@ -50,6 +50,7 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal 12_000, valid.dig("timeline", "provider_job_ms")
     assert_match(/\ABuildkite /, valid.dig("timeline", "clock_note").split("provider times use ").last)
     assert_equal "2026-10-20T00:00:21Z", valid.dig("timeline", "provider_terminal_boundary", "build_finished_at")
+    assert_equal "unknown: not recorded at controller start", valid.fetch("controller_revision")
     assert_match(/Buildkite-clock workload job finished_at/, valid.dig("timeline", "controller_accept_to_job_completed_note"))
     refute_match(/GitHub/, valid.dig("timeline", "controller_accept_to_job_completed_note"))
     assert_match(/\Abenchmark-cold: .*GHAC toolchain volume present/, valid.fetch("cold_qualification"))

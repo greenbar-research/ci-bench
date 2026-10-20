@@ -352,6 +352,42 @@ creates it for organizations without remote Docker builders, and it cannot be
 disabled. Buildkite cold samples are therefore recorded with cold
 qualification `missing` while that volume exists.
 
+## Controller contracts
+
+- **Immutable dispatch ref.** Each measured commit is named by a lightweight
+  tag `pilot/<full sha>`. The controllers verify that the tag names exactly
+  that commit, then:
+  - GitHub-dispatched targets dispatch from the tag, so the workflow
+    definition is the measured commit's;
+  - Buildkite builds name the commit directly.
+  Collector-only pushes to `main` therefore never change what a run or a
+  cold/warm pair measures.
+- **Request budgets.** A shared lock spaces the requests of every controller
+  on the host:
+  - Buildkite: 1.3 s between requests, under the 50 requests per user per
+    minute limit;
+  - GitHub: 0.8 s, under 5,000 per hour.
+
+  Pollers run every 5 s. Read-only Buildkite requests retry 429s, 5xx, and
+  timeouts after Retry-After.
+- **Build creation is never blindly retried.** Only a 429 is retried. After
+  any other failure, the controller looks up the build by its
+  `CI_BENCH_REQUEST_ID` env instead of posting again. A reconciled build
+  records that `trigger_accepted_at` is the lookup time.
+- **Three revisions per sample:**
+  - the measured source, in `comparison_group`;
+  - `controller_revision`, the controller code that started and polled the
+    run, recorded at start;
+  - `collector`.
+
+  A running Bash controller keeps the code it started with, so its records
+  carry its own poll interval. Earlier records without
+  `controller_revision` say so rather than guessing.
+- **Depot CI** runs `.depot/workflows/probe.yml` and `pilot.yml`, which are
+  byte-identical copies of the GitHub workflows. `pilot-runner` identifies
+  Depot CI by `DEPOT_JOB_URL`, and Depot's GitHub Actions runners by
+  `RUNNER_ENVIRONMENT=self-hosted`.
+
 ## Buildkite native YAML target
 
 The `buildkite-native` target runs the same useful work without GHAC:

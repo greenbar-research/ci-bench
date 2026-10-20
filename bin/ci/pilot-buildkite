@@ -23,14 +23,91 @@ repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
 api="https://api.buildkite.com/v2/organizations/$org"
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 
-# bk URL [curl args...]: authenticated request; the header is read from stdin.
+# throttle NAME MIN_MS: spaces requests to one API across every controller on
+# this host (lock and timestamp under TMPDIR), bounding the aggregate rate.
+throttle() {
+  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now
+  exec {fd}>>"$file.lock"
+  flock "$fd"
+  last="$(cat "$file" 2>/dev/null || echo 0)"
+  now="$(date +%s%3N)"
+  if (( now - last < min_ms )); then sleep "$(awk -v ms="$((min_ms - now + last))" 'BEGIN { print ms / 1000 }')"; fi
+  date +%s%3N > "$file"
+  exec {fd}>&-
+}
+
+# GitHub allows 5,000 REST requests per hour; 800 ms spacing keeps all
+# controllers together under 4,500.
+ghapi() { throttle github 800; gh api "$@"; }
+
+# Revision of the controller code that started this run. A running Bash
+# controller keeps the definitions it started with, so this can differ from
+# both the measured SHA and a later collector.
+controller_revision() {
+  jq -n --arg sha "$(git rev-parse HEAD)" --argjson dirty "$([[ -z "$(git status --porcelain -- bin/ci)" ]] && echo false || echo true)" \
+    '{sha: $sha, bin_ci_dirty: $dirty}'
+}
+
+# verify_pilot_tag SHA: the measured commit is dispatched through the
+# immutable lightweight tag pilot/SHA, so later collector-only pushes to main
+# never change what a run or a cold/warm pair measures.
+verify_pilot_tag() {
+  local sha="$1" object
+  object="$(ghapi "repos/$repo/git/ref/tags/pilot/$sha" --jq '"\(.object.type) \(.object.sha)"' 2>/dev/null || true)"
+  if [[ "$object" != "commit $sha" ]]; then
+    echo "tag pilot/$sha does not name commit $sha; refusing" >&2
+    exit 1
+  fi
+}
+
+# bk URL [curl args...]: authenticated read-only request; the header is read
+# from stdin. Buildkite allows 50 REST requests per user per minute, so calls
+# are throttled, and curl retries 429s, 5xx, and timeouts after Retry-After.
+# Only idempotent reads go through bk; builds are created with bk_create.
 bk() {
   local url="$1"
   shift
   : "${BUILDKITE_API_TOKEN:?BUILDKITE_API_TOKEN is not loaded}"
-  # Buildkite allows 50 REST requests per user per minute; curl retries 429s
-  # after the server's Retry-After.
+  throttle buildkite 1300
   curl --fail --silent --show-error --retry 8 --retry-max-time 180 -K - "$@" "$url" <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\""
+}
+
+# bk_create BODY_FILE SHA REQUEST_ID FLAG_FILE: creates one build and prints it. Only a
+# 429, a definite rejection, is retried after Retry-After. Any other failure
+# may follow acceptance, so the build is looked up by its CI_BENCH_REQUEST_ID
+# env instead of posting again.
+bk_create() {
+  local body="$1" sha="$2" request_id="$3" flag="$4" out headers code="" wait attempt
+  out="$(mktemp)" headers="$(mktemp)"
+  for attempt in 1 2 3 4 5; do
+    throttle buildkite 1300
+    code="$(curl --silent --show-error --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - \
+      -X POST -H 'Content-Type: application/json' --data-binary "@$body" "$api/pipelines/$pipeline/builds" \
+      <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\"" || true)"
+    if [[ "$code" == 201 ]]; then
+      cat "$out"
+      rm -f "$out" "$headers"
+      return 0
+    fi
+    [[ "$code" == 429 ]] || break
+    wait="$(awk -F': *' 'tolower($1) == "retry-after" { print $2 + 0 }' "$headers")"
+    sleep "${wait:-30}"
+  done
+  rm -f "$out" "$headers"
+  echo "build create returned HTTP ${code:-none}; reconciling by request ID $request_id" >&2
+  sleep 10
+  local builds match
+  if ! builds="$(bk "$api/pipelines/$pipeline/builds?commit=$sha&per_page=30")"; then
+    echo "lookup failed, so whether request ID $request_id was accepted is unknown; not posting again" >&2
+    return 1
+  fi
+  match="$(jq -c --arg id "$request_id" '[.[] | select(.env.CI_BENCH_REQUEST_ID == $id)] | if length == 1 then .[0] else empty end' <<<"$builds")"
+  if [[ -z "$match" ]]; then
+    echo "no single build carries request ID $request_id; not posting again" >&2
+    return 1
+  fi
+  echo "$code" > "$flag"
+  printf '%s\n' "$match"
 }
 
 sanitize() {
@@ -45,12 +122,7 @@ volumes() { bk "$api/clusters/$cluster/cache_volumes"; }
 
 run() {
   local workflow="$1" sha="$2" profile="${3:-probe}" phase="${4:-}" epoch="${5:-}"
-  local remote_sha
-  remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
-  if [[ "$remote_sha" != "$sha" ]]; then
-    echo "origin main is $remote_sha, not expected $sha; refusing to create a build" >&2
-    exit 1
-  fi
+  verify_pilot_tag "$sha"
   local target=buildkite-ghac runner=ubuntu-24.04
   case "$workflow" in
     probe.yml|native-probe.yml) [[ "$profile" == probe ]] || { echo "probes take no profile" >&2; exit 2; } ;;
@@ -58,24 +130,29 @@ run() {
     *) echo "workflow must be probe.yml, pilot.yml, native-probe.yml, or native-pilot.yml" >&2; exit 2 ;;
   esac
   [[ "$workflow" == native-* ]] && target=buildkite-native runner=buildkite-native
-  local scratch volumes_before body requested_at response accepted_at number dir
+  local scratch volumes_before body requested_at response accepted_at number dir request_id
+  request_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
   scratch="$(mktemp -d)"
   volumes_before="$(volumes)"
   body="$scratch/body.json"
-  jq -n --arg sha "$sha" --arg workflow "$workflow" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
+  jq -n --arg sha "$sha" --arg workflow "$workflow" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg request_id "$request_id" \
     '{commit: $sha, branch: "main", message: "ci-bench unscored pilot \($workflow) \($profile) \($phase)",
-      env: ({CI_BENCH_WORKFLOW: $workflow, CI_BENCH_EXPECTED_SHA: $sha}
+      env: ({CI_BENCH_WORKFLOW: $workflow, CI_BENCH_EXPECTED_SHA: $sha, CI_BENCH_REQUEST_ID: $request_id}
         + (if ($workflow | test("pilot")) then {CI_BENCH_PROFILE: $profile, CI_BENCH_CACHE_PHASE: $phase, CI_BENCH_CACHE_EPOCH: $epoch} else {} end))}' > "$body"
   requested_at="$(iso_now)"
-  response="$(bk "$api/pipelines/$pipeline/builds" -X POST -H 'Content-Type: application/json' --data-binary "@$body")"
+  response="$(bk_create "$body" "$sha" "$request_id" "$scratch/reconciled")"
   accepted_at="$(iso_now)"
+  local acceptance="create response"
+  [[ -f "$scratch/reconciled" ]] && acceptance="reconciled by request ID after HTTP $(cat "$scratch/reconciled"); trigger_accepted_at is the lookup time"
   number="$(jq -r .number <<<"$response")"
   dir="tmp/pilot-evidence/bk-$number"
   mkdir -p "$dir"
   jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg workflow "$workflow" --arg target "$target" --arg runner "$runner" \
     --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" \
     --argjson response "$response" --argjson volumes "$volumes_before" \
-    '{controller_clock: "orb UTC", target: $target, workflow: $workflow, profile: $profile,
+    --arg request_id "$request_id" --arg acceptance "$acceptance" --argjson controller_revision "$(controller_revision)" \
+    '{controller_clock: "orb UTC", controller_revision: $controller_revision, request_id: $request_id, trigger_acceptance: $acceptance,
+      poll_interval_ms: 5000, target: $target, workflow: $workflow, profile: $profile,
       trigger_requested_at: $requested_at, trigger_accepted_at: $accepted_at,
       inputs: ({expected_sha: $sha, runner: $runner} + (if ($workflow | test("pilot")) then {profile: $profile, cache_phase: $phase, cache_epoch: $epoch} else {} end)),
       provider_cache_volumes_before: $volumes,
