@@ -1,0 +1,21 @@
+# Buildkite Cache definition for the native pilot (bin/ci/pilot-native with
+# CI_BENCH_NATIVE_CACHE=buildkite-cache). It is the native equivalent of the
+# logical actions/cache entry in pilot.yml: same paths, epoch, profile, and
+# lockfile identity. No key part sets fallback_limit, so a restore matches the
+# exact key or misses. The file is passed explicitly with --cache-config-file,
+# so it is never auto-discovered by other jobs.
+caches:
+  - name: "pilot_deps"
+    cache_key:
+      - "ci-bench-pilot"
+      - env: "CI_BENCH_CACHE_EPOCH"
+      - env: "CI_BENCH_PROFILE"
+      - env: "CI_BENCH_RUNNER"
+      - agent: "os"
+      - agent: "arch"
+      - checksum:
+          - "Gemfile.lock"
+          - "package-lock.json"
+    target_paths:
+      - "vendor/bundle"
+      - "tmp/ci-bench-cache"

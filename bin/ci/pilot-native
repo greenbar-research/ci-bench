@@ -37,6 +37,61 @@ collect_and_upload() {
 }
 trap collect_and_upload EXIT
 
+# cache_digest: SHA-256 over the cached files' paths and contents, excluding
+# the sentinel and the digest itself.
+cache_digest() {
+  find vendor/bundle tmp/ci-bench-cache -type f ! -path tmp/ci-bench-cache/key ! -path tmp/ci-bench-cache/digest -print0 2>/dev/null |
+    sort -z | xargs -0 -r sha256sum | sha256sum | cut -c1-64
+}
+
+# check_cache: decides the benchmark-cache hit from the sentinel and writes
+# tmp/pilot/cache.env; exits non-zero when the hit contradicts the cache
+# phase. With CI_BENCH_NATIVE_CACHE=buildkite-cache (Buildkite native) it first
+# restores the entry by exact key and requires the restored content digest to
+# match the one saved by the cold run. Other providers restore the entry
+# before this script runs.
+check_cache() {
+  if [[ "${CI_BENCH_NATIVE_CACHE:-}" == buildkite-cache ]]; then
+    buildkite-agent cache restore --cache-config-file .buildkite/native-cache.yml --name pilot_deps --cache-fail-on-error
+  fi
+  local lock_hash cache_key sentinel=tmp/ci-bench-cache/key cache_hit=false digest_line=""
+  lock_hash="$(cat Gemfile.lock package-lock.json | sha256sum | cut -c1-64)"
+  cache_key="ci-bench-pilot-${CI_BENCH_CACHE_EPOCH}-${CI_BENCH_PROFILE}-${CI_BENCH_RUNNER}-Linux-${lock_hash}"
+  [[ -f "$sentinel" && "$(cat "$sentinel")" == "$cache_key" ]] && cache_hit=true
+  if [[ "${CI_BENCH_NATIVE_CACHE:-}" == buildkite-cache && "$cache_hit" == true ]]; then
+    if [[ "$(cache_digest)" == "$(cat tmp/ci-bench-cache/digest 2>/dev/null)" ]]; then
+      digest_line="cache_digest=match"
+    else
+      digest_line="cache_digest=mismatch"
+      cache_hit=false
+    fi
+  fi
+  { echo "cache_key=$cache_key"; echo "cache_hit=$cache_hit"; [[ -z "$digest_line" ]] || echo "$digest_line"; } > tmp/pilot/cache.env
+  if [[ "$CI_BENCH_CACHE_PHASE" == cold && "$cache_hit" == true ]]; then
+    echo "cache_expectation=violated: cold run restored an existing entry" >> tmp/pilot/cache.env
+    echo "cold run restored an existing cache entry; use a new cache_epoch" >&2
+    return 1
+  fi
+  if [[ "$CI_BENCH_CACHE_PHASE" == warm && "$cache_hit" != true ]]; then
+    echo "cache_expectation=violated: warm run missed the cache" >> tmp/pilot/cache.env
+    echo "warm run did not restore the cold run's cache entry" >&2
+    return 1
+  fi
+  echo "cache_expectation=met" >> tmp/pilot/cache.env
+}
+
+# commit_cache: after a successful run, writes the sentinel so a later warm run
+# can trust a hit. With CI_BENCH_NATIVE_CACHE=buildkite-cache, a cold run also
+# records the content digest and saves the entry by exact key.
+commit_cache() {
+  mkdir -p tmp/ci-bench-cache
+  awk -F= '$1 == "cache_key" { print $2 }' tmp/pilot/cache.env > tmp/ci-bench-cache/key
+  if [[ "${CI_BENCH_NATIVE_CACHE:-}" == buildkite-cache && "$CI_BENCH_CACHE_PHASE" == cold ]]; then
+    cache_digest > tmp/ci-bench-cache/digest
+    buildkite-agent cache save --cache-config-file .buildkite/native-cache.yml --name pilot_deps --cache-fail-on-error
+  fi
+}
+
 export_target() {
   # pilot-runner records the target in runner.env; bin/bench reads BENCH_TARGET.
   local target
@@ -61,23 +116,7 @@ case "$mode" in
     export_target
     bin/ci/pilot-mark identity:end cache:start
 
-    lock_hash="$(cat Gemfile.lock package-lock.json | sha256sum | cut -c1-64)"
-    cache_key="ci-bench-pilot-${CI_BENCH_CACHE_EPOCH}-${CI_BENCH_PROFILE}-${CI_BENCH_RUNNER}-Linux-${lock_hash}"
-    sentinel=tmp/ci-bench-cache/key
-    cache_hit=false
-    [[ -f "$sentinel" && "$(cat "$sentinel")" == "$cache_key" ]] && cache_hit=true
-    { echo "cache_key=$cache_key"; echo "cache_hit=$cache_hit"; } > tmp/pilot/cache.env
-    if [[ "$CI_BENCH_CACHE_PHASE" == cold && "$cache_hit" == true ]]; then
-      echo "cache_expectation=violated: cold run restored an existing entry" >> tmp/pilot/cache.env
-      echo "cold run restored an existing cache entry; use a new cache_epoch" >&2
-      exit 1
-    fi
-    if [[ "$CI_BENCH_CACHE_PHASE" == warm && "$cache_hit" != true ]]; then
-      echo "cache_expectation=violated: warm run missed the cache" >> tmp/pilot/cache.env
-      echo "warm run did not restore the cold run's cache entry" >&2
-      exit 1
-    fi
-    echo "cache_expectation=met" >> tmp/pilot/cache.env
+    check_cache
     bin/ci/pilot-mark cache:end setup:start
 
     # Same prebuilt Ruby that ruby/setup-ruby 1.331.0 installs on ubuntu-24.04 x64.
@@ -134,10 +173,7 @@ case "$mode" in
     bin/bench run --profile "$CI_BENCH_PROFILE" --output tmp/pilot/result.json 2>&1 | tee -a tmp/pilot/bench.log
     bin/ci/pilot-mark workload:end
 
-    # Only a successful job commits the provider cache, so a later warm run can
-    # trust this sentinel.
-    mkdir -p tmp/ci-bench-cache
-    echo "$cache_key" > "$sentinel"
+    commit_cache
     ;;
   *)
     echo "usage: bin/ci/pilot-native probe|pilot" >&2
