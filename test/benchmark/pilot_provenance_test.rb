@@ -84,9 +84,26 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal 1, ghac_step.fetch("invalid_reasons").grep(/job graph parity failed/).size
   end
 
+  def test_runner_providers_and_circleci_qualify_cold_without_cluster_volumes
+    depot = provenance(runner: { "target" => "depot" }, controller_extra: { "target" => "depot" })
+    assert_equal [], depot.fetch("invalid_reasons")
+    assert_match(/\Abenchmark-cold: exact dependency-cache miss verified/, depot.fetch("cold_qualification"))
+    assert_includes depot.dig("cache", "provider_owned_unknowns"), "Depot Registry pull auth"
+
+    circle = provenance(circle: {})
+    assert_equal [], circle.fetch("invalid_reasons")
+    assert_equal ".circleci/config.yml", circle.dig("comparison_group", "workflow_path")
+    assert_equal ["pilot"], circle.dig("graph", "workflow_logical_jobs")
+    assert_equal 30_000, circle.dig("timeline", "provider_job_ms")
+    assert_match(/CircleCI API v2/, circle.dig("timeline", "clock_note"))
+
+    rerun = provenance(circle: { "extra_job" => true })
+    assert_includes rerun.fetch("invalid_reasons"), "run attempt is not 1 or a job was retried"
+  end
+
   private
 
-  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil, controller_extra: {})
+  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil, controller_extra: {}, circle: nil)
     digest ||= YAML.safe_load(`git -C #{ROOT} show #{SHA}:benchmark/manifest.yml`).dig("profiles", "smoke", "expected_verification_digest")
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "artifact"))
@@ -95,6 +112,7 @@ class PilotProvenanceTest < Minitest::Test
       controller = controller.merge("profile" => "probe", "inputs" => { "expected_sha" => SHA }, "terminal_observation" => observation) if probe
       target = buildkite&.fetch("native", false) ? "buildkite-native" : "buildkite-ghac"
       controller = controller.merge("target" => target, "provider_cache_volumes_before" => volumes) if buildkite
+      controller = controller.merge("target" => "circleci") if circle
       controller = controller.merge("workflow" => "native-pilot.yml") if buildkite&.fetch("native", false)
       write_json(dir, "controller.json", controller.merge(controller_extra))
       if buildkite
@@ -104,6 +122,13 @@ class PilotProvenanceTest < Minitest::Test
         write_json(dir, "build.json", { "number" => 1, "state" => "passed", "commit" => SHA, "created_at" => "2026-10-20T00:00:02Z",
                                         "started_at" => "2026-10-20T00:00:03Z", "finished_at" => "2026-10-20T00:00:21Z",
                                         "jobs" => [{ "step_key" => "gha-importer", "state" => "passed" }, workload] + (buildkite["extra_jobs"] || []) })
+      elsif circle
+        job = { "name" => "pilot", "status" => "success", "number" => 7, "queued_at" => "2026-10-20T00:00:04Z",
+                "started_at" => "2026-10-20T00:00:05Z", "stopped_at" => "2026-10-20T00:00:35Z",
+                "executor" => { "type" => "machine", "resource_class" => "large.gen2" } }
+        write_json(dir, "circleci.json", { "pipeline" => { "number" => 3, "created_at" => "2026-10-20T00:00:02Z", "vcs" => { "revision" => SHA } },
+                                           "workflow" => { "status" => "success", "created_at" => "2026-10-20T00:00:03Z", "stopped_at" => "2026-10-20T00:00:36Z" },
+                                           "jobs" => [job] + (circle["extra_job"] ? [job.merge("number" => 8)] : []) })
       else
         write_json(dir, "run.json", { "status" => "completed", "conclusion" => "success", "head_sha" => SHA, "run_attempt" => 1 }.merge(run))
         write_json(dir, "jobs.json", { "jobs" => [{ "conclusion" => "success" }.merge(job)] })
@@ -115,7 +140,7 @@ class PilotProvenanceTest < Minitest::Test
           { "status" => "passed", "git_dirty" => false, "verification" => { "digest" => digest }, "workloads" => [] })
         File.write(File.join(dir, "artifact/cache.env"), "cache_expectation=met\n")
       end
-      runner_env = { "target" => buildkite ? target : "github-actions", "envelope_match" => "true", "checkout_sha" => SHA,
+      runner_env = { "target" => buildkite ? target : (circle ? "circleci" : "github-actions"), "envelope_match" => "true", "checkout_sha" => SHA,
                      "docker_endpoint" => "unix:///var/run/docker.sock", "docker_builder" => "docker" }.merge(runner)
       File.write(File.join(dir, "artifact/runner.env"), runner_env.map { |k, v| "#{k}=#{v}\n" }.join)
       File.write(File.join(dir, "artifact-checksums.txt"), "verified\n")

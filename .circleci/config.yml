@@ -2,9 +2,11 @@
 # (bin/ci/pilot-circleci) triggers a pipeline through the API with
 # expected_sha set; pushes and pipelines without parameters run nothing.
 # bin/ci/pilot-native mirrors .github/workflows/probe.yml and pilot.yml step
-# for step. The machine image is CircleCI's Ubuntu 24.04 image on large.gen2
-# (4 vCPU / 16 GiB). Docker uses the local daemon; docker_layer_caching stays
-# off.
+# for step. The machine image is CircleCI's dated Ubuntu 24.04 image
+# 2026.05.1 (not the mutable :current tag) on large.gen2 (4 vCPU / 16 GiB).
+# Docker uses the local daemon; docker_layer_caching stays off.
+# store_artifacts runs after a failed step without a when key; CircleCI does
+# not accept when on it.
 version: 2.1
 
 parameters:
@@ -30,7 +32,7 @@ parameters:
 executors:
   pilot:
     machine:
-      image: ubuntu-2404:current
+      image: ubuntu-2404:2026.05.1
       docker_layer_caching: false
     resource_class: large.gen2
     environment:
@@ -49,7 +51,6 @@ jobs:
       - store_artifacts:
           path: tmp/pilot
           destination: pilot
-          when: always
 
   pilot:
     executor: pilot
@@ -76,7 +77,6 @@ jobs:
       - store_artifacts:
           path: tmp/pilot
           destination: pilot
-          when: always
 
 workflows:
   probe:

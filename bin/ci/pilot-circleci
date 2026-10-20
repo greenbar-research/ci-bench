@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# Controller for the unscored CircleCI pilot target.
+#
+#   bin/ci/pilot-circleci probe EXPECTED_SHA
+#   bin/ci/pilot-circleci run EXPECTED_SHA PROFILE CACHE_PHASE CACHE_EPOCH
+#   bin/ci/pilot-circleci collect PIPELINE_ID [EVIDENCE_DIR]
+#
+# A pipeline is created through POST /pipeline/run with config and checkout
+# both pinned to the immutable tag pilot/EXPECTED_SHA. The controller records
+# controller-clock times, polls to its terminal observation, then collects the
+# pipeline, workflow, job details, artifacts, and sanitized step logs. The
+# API token is read from CIRCLECI_TOKEN and passed to curl on stdin, never on
+# the command line. Evidence stays under tmp/pilot-evidence/cc-<number>.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
+slug="gh/$repo"
+definition="${CI_BENCH_CIRCLECI_DEFINITION:-c6f5dfba-472d-5811-925b-ca433553bc2f}"
+api="${CI_BENCH_CIRCLECI_API:-https://circleci.com/api/v2}"
+api_v1="${api%/v2}/v1.1"
+iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+# throttle NAME MIN_MS: spaces every HTTP attempt to one API, including
+# retries, across all controllers on this host (lock and timestamp under
+# TMPDIR), bounding the aggregate rate. When CI_BENCH_LIMITER_LOG is set, each
+# call appends its elapsed client-side delay in milliseconds, from before
+# waiting for the lock until its release.
+throttle() {
+  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now started
+  started="$(date +%s%3N)"
+  exec {fd}>>"$file.lock"
+  flock "$fd"
+  last="$(cat "$file" 2>/dev/null || echo 0)"
+  now="$(date +%s%3N)"
+  if (( now - last < min_ms )); then
+    sleep "$(awk -v ms="$((min_ms - now + last))" 'BEGIN { print ms / 1000 }')"
+  fi
+  date +%s%3N > "$file"
+  exec {fd}>&-
+  if [[ -n "${CI_BENCH_LIMITER_LOG:-}" ]]; then echo "$(( $(date +%s%3N) - started ))" >> "$CI_BENCH_LIMITER_LOG"; fi
+}
+
+limiter_summary() {
+  awk '{ total += $1; n++ } END { printf "{\"wait_ms\": %d, \"attempts\": %d}", total, n }' "$1" 2>/dev/null || echo '{"wait_ms": 0, "attempts": 0}'
+}
+
+controller_revision() {
+  jq -n --arg sha "$(git rev-parse HEAD)" --argjson dirty "$([[ -z "$(git status --porcelain -- bin/ci)" ]] && echo false || echo true)" \
+    '{sha: $sha, bin_ci_dirty: $dirty}'
+}
+
+verify_pilot_tag() {
+  local sha="$1" object
+  throttle github 800
+  object="$(gh api "repos/$repo/git/ref/tags/pilot/$sha" --jq '"\(.object.type) \(.object.sha)"' 2>/dev/null || true)"
+  if [[ "$object" != "commit $sha" ]]; then
+    echo "tag pilot/$sha does not name commit $sha; refusing" >&2
+    exit 1
+  fi
+}
+
+# cc URL [OUTPUT_FILE]: authenticated read-only GET to OUTPUT_FILE or stdout.
+# It succeeds only when curl exits 0 and the status is 2xx; transport
+# failures, 429, and 5xx are retried after Retry-After (10 s by default), and
+# every attempt passes through the shared 1 s limiter.
+cc() {
+  local url="$1" output="${2:-}" out headers code="" rc wait attempt
+  : "${CIRCLECI_TOKEN:?CIRCLECI_TOKEN is not loaded}"
+  out="$(mktemp)" headers="$(mktemp)"
+  for attempt in 1 2 3 4 5 6 7 8; do
+    throttle circleci 1000
+    if code="$(curl --silent --show-error --location --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
+      --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - "$url" \
+      <<<"header = \"Circle-Token: $CIRCLECI_TOKEN\"")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 && "$code" == 2?? ]]; then
+      if [[ -n "$output" ]]; then mv "$out" "$output"; else cat "$out"; rm -f "$out"; fi
+      rm -f "$headers"
+      return 0
+    fi
+    [[ "$rc" != 0 || "$code" == 429 || "$code" == 5?? ]] || break
+    wait="$(awk -F': *' 'tolower($1) == "retry-after" { v = $2 + 0 } END { print v + 0 }' "$headers")"
+    sleep "$(( wait > 0 ? wait : 10 ))"
+  done
+  rm -f "$out" "$headers"
+  echo "GET ${url%%\?*} failed with HTTP ${code:-none}, curl exit ${rc:-none}" >&2
+  return 1
+}
+
+# cc_create BODY_FILE SHA REQUESTED_AT STATE_DIR: creates one pipeline and
+# prints it. Only a transport-complete 429 is retried. Any other failure may
+# follow acceptance, and pipeline parameters cannot carry a request ID, so the
+# controller looks for exactly one pipeline on tag pilot/SHA created since the
+# request instead of posting again. One CircleCI controller runs at a time.
+cc_create() {
+  local body="$1" sha="$2" requested_at="$3" state="$4" out headers code="" rc wait attempt
+  out="$(mktemp)" headers="$(mktemp)"
+  for attempt in 1 2 3 4 5; do
+    throttle circleci 1000
+    if [[ "$attempt" == 1 ]]; then iso_now > "$state/first_send_at"; fi
+    if code="$(curl --silent --show-error --connect-timeout 15 --max-time "${CI_BENCH_HTTP_MAX_TIME:-300}" \
+      --output "$out" --dump-header "$headers" --write-out '%{http_code}' -K - \
+      -X POST -H 'Content-Type: application/json' --data-binary "@$body" "$api/project/$slug/pipeline/run" \
+      <<<"header = \"Circle-Token: $CIRCLECI_TOKEN\"")"; then rc=0; else rc=$?; fi
+    if [[ "$rc" == 0 && "$code" == 20[01] ]]; then
+      cat "$out"
+      rm -f "$out" "$headers"
+      return 0
+    fi
+    [[ "$rc" == 0 && "$code" == 429 ]] || break
+    wait="$(awk -F': *' 'tolower($1) == "retry-after" { v = $2 + 0 } END { print v + 0 }' "$headers")"
+    sleep "$(( wait > 0 ? wait : 30 ))"
+  done
+  rm -f "$out" "$headers"
+  echo "pipeline create returned HTTP ${code:-none}, curl exit ${rc:-none}; reconciling by tag and time" >&2
+  sleep 10
+  local pipelines match
+  if ! pipelines="$(cc "$api/project/$slug/pipeline")"; then
+    echo "lookup failed, so whether the pipeline was accepted is unknown; not posting again" >&2
+    return 1
+  fi
+  match="$(jq -c --arg tag "pilot/$sha" --arg since "$requested_at" \
+    '[.items[] | select(.vcs.tag == $tag and .created_at >= ($since | sub("\\.[0-9]+Z$"; "Z")))] | if length == 1 then .[0] else empty end' <<<"$pipelines")"
+  if [[ -z "$match" ]]; then
+    echo "no single pipeline on pilot/$sha since $requested_at; not posting again" >&2
+    return 1
+  fi
+  echo "$code" > "$state/reconciled"
+  printf '%s\n' "$match"
+}
+
+sanitize() {
+  sed -E \
+    -e 's/(CCIPAT_)[A-Za-z0-9_]{20,}/\1[REDACTED]/g' \
+    -e 's/(gh[pousr]_)[A-Za-z0-9]{20,}/\1[REDACTED]/g' \
+    -e 's/(github_pat_)[A-Za-z0-9_]{20,}/\1[REDACTED]/g' \
+    -e 's/(AUTHORIZATION: (basic|bearer|token) )[^ ]+/\1[REDACTED]/Ig'
+}
+
+# workflow_state PIPELINE_ID: prints "terminal" once the pipeline has errored
+# or its single workflow has a terminal status.
+workflow_state() {
+  local pipeline workflows
+  pipeline="$(cc "$api/pipeline/$1")" || { echo poll-error; return; }
+  if [[ "$(jq -r .state <<<"$pipeline")" == errored ]]; then echo terminal; return; fi
+  workflows="$(cc "$api/pipeline/$1/workflow")" || { echo poll-error; return; }
+  jq -r 'if (.items | length) == 0 then "pending"
+         elif all(.items[]; .status | IN("success", "failed", "error", "failing", "canceled", "unauthorized", "not_run")) then "terminal"
+         else .items[0].status end' <<<"$workflows"
+}
+
+run() {
+  local sha="$1" profile="${2:-probe}" phase="${3:-}" epoch="${4:-}"
+  local call_started_at revision
+  call_started_at="$(iso_now)"
+  revision="$(controller_revision)"
+  verify_pilot_tag "$sha"
+  local mode=pilot params
+  if [[ "$profile" == probe ]]; then
+    mode=probe
+    params="$(jq -n --arg sha "$sha" '{mode: "probe", expected_sha: $sha}')"
+  else
+    [[ "$profile" =~ ^(smoke|full)$ && "$phase" =~ ^(cold|warm)$ && "$epoch" =~ ^[A-Za-z0-9._-]{1,64}$ ]] \
+      || { echo "pilot runs need PROFILE (smoke|full) CACHE_PHASE (cold|warm) CACHE_EPOCH" >&2; exit 2; }
+    params="$(jq -n --arg sha "$sha" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
+      '{mode: "pilot", expected_sha: $sha, profile: $profile, cache_phase: $phase, cache_epoch: $epoch}')"
+  fi
+  local scratch body requested_at response accepted_at id number dir acceptance="create response"
+  scratch="$(mktemp -d)"
+  body="$scratch/body.json"
+  jq -n --arg definition "$definition" --arg tag "pilot/$sha" --argjson params "$params" \
+    '{definition_id: $definition, config: {tag: $tag}, checkout: {tag: $tag}, parameters: $params}' > "$body"
+  # requested_at precedes the limiter wait; first_send_at follows it.
+  requested_at="$(iso_now)"
+  response="$(cc_create "$body" "$sha" "$requested_at" "$scratch")"
+  accepted_at="$(iso_now)"
+  [[ -f "$scratch/reconciled" ]] && acceptance="reconciled by tag and time after HTTP $(cat "$scratch/reconciled"); trigger_accepted_at is the lookup time"
+  id="$(jq -r .id <<<"$response")"
+  number="$(jq -r .number <<<"$response")"
+  dir="tmp/pilot-evidence/cc-$number"
+  mkdir -p "$dir"
+  jq -n --arg call_started_at "$call_started_at" --arg first_send_at "$(cat "$scratch/first_send_at")" \
+    --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg acceptance "$acceptance" \
+    --arg profile "$profile" --arg mode "$mode" --arg sha "$sha" --arg phase "$phase" --arg epoch "$epoch" \
+    --argjson revision "$revision" --argjson response "$response" \
+    '{controller_clock: "orb UTC", controller_revision: $revision, poll_interval_ms: 5000,
+      dispatch_ref: ("pilot/" + $sha), target: "circleci", workflow: $mode, profile: $profile,
+      controller_call_started_at: $call_started_at, trigger_requested_at: $requested_at,
+      trigger_first_http_send_at: $first_send_at, trigger_accepted_at: $accepted_at, trigger_acceptance: $acceptance,
+      inputs: ({expected_sha: $sha, runner: "circleci"} + (if $mode == "pilot" then {profile: $profile, cache_phase: $phase, cache_epoch: $epoch} else {} end)),
+      dispatch_response: $response}' > "$dir/controller.json"
+  echo "$number https://app.circleci.com/pipelines/github/$repo/$number"
+
+  local state last_pending_at observed_at polls=0
+  last_pending_at="$accepted_at"
+  export CI_BENCH_LIMITER_LOG="$scratch/poll-limiter.log"
+  while :; do
+    polls=$((polls + 1))
+    state="$(workflow_state "$id")"
+    if [[ "$state" == terminal ]]; then
+      observed_at="$(iso_now)"
+      break
+    fi
+    last_pending_at="$(iso_now)"
+    sleep 5
+  done
+  unset CI_BENCH_LIMITER_LOG
+  jq --arg observed_at "$observed_at" --arg last_pending_at "$last_pending_at" --argjson polls "$polls" \
+    --argjson limiter "$(limiter_summary "$scratch/poll-limiter.log")" \
+    '.terminal_observation = {observed_at: $observed_at, last_nonterminal_response_at: $last_pending_at,
+      poll_interval_ms: 5000, polls: $polls, poll_limiter: $limiter}' "$dir/controller.json" > "$dir/controller.json.new"
+  mv "$dir/controller.json.new" "$dir/controller.json"
+  rm -rf "$scratch"
+  collect "$id" "$dir"
+}
+
+collect() {
+  local id="$1" dir="${2:-}" observed_at pipeline workflows workflow_id
+  observed_at="$(iso_now)"
+  pipeline="$(cc "$api/pipeline/$id")"
+  dir="${dir:-tmp/pilot-evidence/cc-$(jq -r .number <<<"$pipeline")}"
+  mkdir -p "$dir/logs"
+  workflows="$(cc "$api/pipeline/$id/workflow")"
+  workflow_id="$(jq -r '.items[0].id // empty' <<<"$workflows")"
+  local job_list="[]" details="[]" number
+  if [[ -n "$workflow_id" ]]; then
+    job_list="$(cc "$api/workflow/$workflow_id/job" | jq '.items')"
+    for number in $(jq -r '.[] | .job_number // empty' <<<"$job_list"); do
+      details="$(jq --argjson d "$(cc "$api/project/$slug/job/$number")" '. + [$d]' <<<"$details")"
+    done
+  fi
+  jq -n --argjson pipeline "$pipeline" --argjson workflows "$workflows" --argjson jobs "$details" --argjson job_list "$job_list" \
+    '{pipeline: $pipeline, workflow: ($workflows.items[0] // {}), workflows: $workflows.items, job_list: $job_list, jobs: $jobs}' > "$dir/circleci.json"
+
+  # Step logs come from API v1.1; output URLs are presigned and need no token.
+  rm -rf "$dir/artifact"
+  mkdir -p "$dir/artifact"
+  local workload_number
+  workload_number="$(jq -r '.[0].number // empty' <<<"$details")"
+  if [[ -n "$workload_number" ]]; then
+    cc "$api_v1/project/github/$repo/$workload_number" "$dir/job-v1.json" || true
+    jq -r '[.steps[]? | .actions[]? | select(.output_url) | {name, url: .output_url}] | to_entries[] | "\(.key)\t\(.value.url)"' "$dir/job-v1.json" 2>/dev/null |
+      while IFS=$'\t' read -r index url; do
+        curl --fail --silent --show-error --location --max-time 120 "$url" | jq -r '.[]?.message // empty' | sanitize > "$dir/logs/step-$index.txt" || true
+      done
+    cc "$api/project/$slug/$workload_number/artifacts" "$dir/artifacts.json"
+    jq -r '.items[] | select(.path | startswith("pilot/")) | "\(.url)\t\(.path)"' "$dir/artifacts.json" |
+      while IFS=$'\t' read -r url path; do
+        mkdir -p "$dir/artifact/$(dirname "${path#pilot/}")"
+        cc "$url" "$dir/artifact/${path#pilot/}"
+      done
+  fi
+  if [[ -f "$dir/artifact/SHA256SUMS" ]]; then
+    (cd "$dir/artifact" && sha256sum --check --quiet SHA256SUMS) \
+      && echo verified > "$dir/artifact-checksums.txt" \
+      || echo failed > "$dir/artifact-checksums.txt"
+  else
+    echo unavailable > "$dir/artifact-checksums.txt"
+  fi
+  ruby bin/ci/pilot-provenance "$dir" "$observed_at" > "$dir/provenance.json"
+  jq '{target, provider: .provider, comparative_sample_valid, invalid_reasons, cold_qualification}' "$dir/provenance.json"
+}
+
+case "${1:-}" in
+  probe) shift; run "$1" probe ;;
+  run) shift; run "$@" ;;
+  collect) shift; collect "$@" ;;
+  *) sed -n '2,13p' "$0" >&2; exit 2 ;;
+esac

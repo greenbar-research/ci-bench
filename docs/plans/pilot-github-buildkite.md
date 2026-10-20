@@ -407,8 +407,8 @@ qualification `missing` while that volume exists.
 
 ## CircleCI target
 
-- `.circleci/config.yml` runs `bin/ci/pilot-native` on a
-  `ubuntu-2404:current` machine with `resource_class: large.gen2` (4 vCPU /
+- `.circleci/config.yml` runs `bin/ci/pilot-native` on the dated
+  `ubuntu-2404:2026.05.1` machine image (not the mutable `current` tag) with `resource_class: large.gen2` (4 vCPU /
   16 GiB). It sets `CI_BENCH_RUNNER=circleci`, and `pilot-runner` identifies
   the target by `CIRCLECI=true`.
 - Workflows run only when an API trigger sets `expected_sha`. A push, or a
@@ -416,8 +416,10 @@ qualification `missing` while that volume exists.
 - `restore_cache` and `save_cache` hold the logical cache entry
   (`vendor/bundle`, `tmp/ci-bench-cache`) under the epoch and profile key.
   `docker_layer_caching` stays off.
-- The config first exists at revision R6, so CircleCI samples are measured
-  at R6 and form their own comparison group over the same useful work.
+- R6 added the config. R7 pins the dated image and drops an unsupported
+  `when` key on `store_artifacts`. CircleCI samples are measured at R7 and
+  form their own comparison group over the same useful work. Other targets
+  are not rerun because of the CircleCI config.
 
 ## Buildkite native YAML target
 

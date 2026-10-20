@@ -40,12 +40,18 @@ manifest_profile = controller["profile"] || controller.dig("inputs", "profile")
 probe = manifest_profile == "probe"
 observation = controller["terminal_observation"] || {}
 build = read_json(File.join(dir, "build.json"))
+# CircleCI evidence: circleci.json holds the pipeline, its workflow, and job
+# details from the v2 API.
+circle = read_json(File.join(dir, "circleci.json"))
 controller_target = controller["target"] || (build ? "buildkite-ghac" : "github-actions")
 workflow_file = controller["workflow"] || (probe ? "probe.yml" : "pilot.yml")
 # Native Buildkite samples run the pipeline files in .buildkite/ instead of a
 # GitHub Actions workflow; their step keys are the logical jobs.
 native = controller_target == "buildkite-native"
-workflow_path = native ? ".buildkite/#{workflow_file}" : ".github/workflows/#{workflow_file}"
+workflow_path = if native then ".buildkite/#{workflow_file}"
+                elsif circle then ".circleci/config.yml"
+                else ".github/workflows/#{workflow_file}"
+                end
 # Toolchain volume the GHAC runtime itself mounts on generated jobs; recorded
 # as a provider-owned cache like GitHub's runner image tool cache.
 ghac_toolchain_volumes = %w[buildkite-gha-linux-amd64]
@@ -83,6 +89,40 @@ if build
   }]
   provider_workload_jobs = workload_jobs.map { |j| j["step_key"] }
   provider_orchestration_jobs = (build_jobs - workload_jobs).map { |j| j["step_key"] || j["label"] || j["type"] }
+elsif circle
+  # CircleCI pipelines are normalized the same way; raw API objects stay in
+  # circleci.json.
+  pipeline = circle["pipeline"] || {}
+  workflow = circle["workflow"] || {}
+  circle_jobs = circle["jobs"] || []
+  c_job = circle_jobs.first || {}
+  terminal = %w[success failed error failing canceled unauthorized not_run].include?(workflow["status"])
+  run = {
+    "id" => pipeline["number"],
+    "status" => terminal ? "completed" : workflow["status"],
+    "conclusion" => workflow["status"],
+    "head_sha" => pipeline.dig("vcs", "revision"),
+    "run_attempt" => circle_jobs.size == 1 && workflow["tag"] != "rerun" ? 1 : "retried",
+    "created_at" => pipeline["created_at"],
+    "run_started_at" => workflow["created_at"],
+    "updated_at" => workflow["stopped_at"],
+    "html_url" => c_job["web_url"],
+    "path" => workflow_path,
+    "repository" => { "full_name" => "greenbar-research/ci-bench" }
+  }
+  jobs = [{
+    "id" => c_job["number"],
+    "conclusion" => c_job["status"],
+    "created_at" => c_job["queued_at"],
+    "started_at" => c_job["started_at"],
+    "completed_at" => c_job["stopped_at"],
+    "html_url" => c_job["web_url"],
+    "runner_name" => c_job.dig("executor", "resource_class"),
+    "labels" => [c_job.dig("executor", "type"), c_job.dig("executor", "resource_class")].compact,
+    "steps" => []
+  }]
+  provider_workload_jobs = circle_jobs.map { |j| j["name"] }
+  provider_orchestration_jobs = []
 else
   provider_workload_jobs = jobs.map { |j| j["name"] }
   provider_orchestration_jobs = []
@@ -96,7 +136,10 @@ workflow_blob = expected_sha.match?(/\A[0-9a-f]{40}\z/) ? `git -C #{repo_root} r
 logical_jobs = begin
   require "yaml"
   definition = YAML.safe_load(`git -C #{repo_root} show #{expected_sha}:#{workflow_path} 2>/dev/null`)
-  native ? definition.fetch("steps").map { |step| step.fetch("key") } : definition.fetch("jobs").keys
+  if native then definition.fetch("steps").map { |step| step.fetch("key") }
+  elsif circle then definition.fetch("workflows").fetch(probe ? "probe" : "pilot").fetch("jobs")
+  else definition.fetch("jobs").keys
+  end
 rescue StandardError
   []
 end
@@ -179,6 +222,18 @@ if build
     "build_finished_at" => build["finished_at"] || "unknown",
     "note" => "Buildkite build finished_at is the provider terminal timestamp; #{native ? "native builds have only the pipeline upload step before the workload step" : "it includes the GHAC concurrency finish step after the workload job"}."
   }
+elsif circle
+  provider_clock = "CircleCI API v2 timestamps (sub-second precision)"
+  provider_field_mapping = {
+    "provider_run_created_at" => "pipeline.created_at", "provider_run_started_at" => "workflow.created_at",
+    "provider_run_updated_at" => "workflow.stopped_at", "provider_job_queued_at" => "job.queued_at",
+    "provider_job_started_at" => "job.started_at", "provider_job_completed_at" => "job.stopped_at"
+  }
+  provider_terminal_boundary = {
+    "job_stopped_at" => job["completed_at"] || "unknown",
+    "workflow_stopped_at" => circle.dig("workflow", "stopped_at") || "unknown",
+    "note" => "CircleCI workflow stopped_at is the provider terminal timestamp for the single-job workflow."
+  }
 else
   provider_clock = "GitHub REST API timestamps (1 s precision)"
   provider_field_mapping = {
@@ -199,7 +254,9 @@ cold_qualification =
     "not applicable"
   elsif cache["cache_expectation"] != "met"
     "missing: dependency-cache miss not verified"
-  elsif controller_target == "github-actions"
+  elsif !controller_target.start_with?("buildkite")
+    # Only Buildkite has cluster cache volumes to inspect; other targets'
+    # provider-owned caches are listed under cache.provider_owned_unknowns.
     "benchmark-cold: exact dependency-cache miss verified; provider-owned caches unknown"
   elsif volumes_before.nil?
     "missing: cluster cache volumes were not recorded before the build"
@@ -316,7 +373,16 @@ record = {
       "Docker base-image layers present on the host image",
       "package mirror and network caches",
       "Playwright download CDN and apt mirror caches"
-    ],
+    ] + {
+      "github-actions" => ["GitHub Actions cache service behind actions/cache"],
+      "buildkite-ghac" => ["Buildkite Results cache-v2 behind actions/cache", "GHAC toolchain volume", "persistent local Docker builder volume (buildkite-local-builder-*)"],
+      "buildkite-native" => ["Buildkite hosted cache volume for the step's cache entry", "persistent local Docker builder volume (buildkite-local-builder-*)"],
+      "depot" => ["Depot GitHub Actions cache backend behind actions/cache", "Depot Cache auto-connect (cache.depot.dev)", "Depot Registry pull auth"],
+      "depot-ci" => ["Depot CI cache backend behind actions/cache", "Depot Cache auto-connect (cache.depot.dev)"],
+      "blacksmith" => ["Blacksmith colocated actions cache behind actions/cache", "Blacksmith Bazel/Buck2 and Go build cache defaults"],
+      "namespace" => ["Namespace cache service behind actions/cache", "Namespace runner image and Docker daemon state"],
+      "circleci" => ["CircleCI cache storage behind save_cache/restore_cache"]
+    }.fetch(controller_target, []),
     "qualification" => "benchmark-cold only: explicit dependency cache keyed by cache_epoch; provider-owned caches cannot be flushed"
   ),
   "result" => result && {
