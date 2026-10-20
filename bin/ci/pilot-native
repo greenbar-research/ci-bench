@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the pilot's useful work on providers that execute plain commands
-# instead of GitHub Actions workflows (Buildkite native YAML). It mirrors
+# instead of GitHub Actions workflows (Buildkite native YAML, CircleCI). It mirrors
 # .github/workflows/probe.yml and pilot.yml step for step, with the same pinned
 # Ruby, Bundler, Node, ImageMagick, system packages, services, and bin/bench
 # commands; keep them in sync.

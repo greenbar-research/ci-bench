@@ -405,6 +405,20 @@ qualification `missing` while that volume exists.
   Depot CI by `DEPOT_JOB_URL`, and Depot's GitHub Actions runners by
   `RUNNER_ENVIRONMENT=self-hosted`.
 
+## CircleCI target
+
+- `.circleci/config.yml` runs `bin/ci/pilot-native` on a
+  `ubuntu-2404:current` machine with `resource_class: large.gen2` (4 vCPU /
+  16 GiB). It sets `CI_BENCH_RUNNER=circleci`, and `pilot-runner` identifies
+  the target by `CIRCLECI=true`.
+- Workflows run only when an API trigger sets `expected_sha`. A push, or a
+  pipeline without parameters, resolves to no workflows.
+- `restore_cache` and `save_cache` hold the logical cache entry
+  (`vendor/bundle`, `tmp/ci-bench-cache`) under the epoch and profile key.
+  `docker_layer_caching` stays off.
+- The config first exists at revision R6, so CircleCI samples are measured
+  at R6 and form their own comparison group over the same useful work.
+
 ## Buildkite native YAML target
 
 The `buildkite-native` target runs the same useful work without GHAC:

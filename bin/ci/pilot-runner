@@ -29,7 +29,8 @@ capture() {
 # compatibility jobs report self-hosted, and their step environment is an
 # allowlist without BUILDKITE_* variables, so the agent binary identifies the
 # host. Runner providers report self-hosted under their own labels. Native
-# Buildkite steps set CI_BENCH_RUNNER=buildkite-native and have no runner env.
+# Buildkite steps set CI_BENCH_RUNNER=buildkite-native and CircleCI jobs set
+# CI_BENCH_RUNNER=circleci; neither has GitHub runner env.
 label="${CI_BENCH_RUNNER:-ubuntu-24.04}"
 fact runner_label "$label"
 case "${RUNNER_ENVIRONMENT:-}:$label" in
@@ -47,6 +48,9 @@ case "${RUNNER_ENVIRONMENT:-}:$label" in
   self-hosted:namespace-*|self-hosted:nscloud-*) target=namespace ;;
   :buildkite-native)
     if [[ "${BUILDKITE:-}" == true ]]; then target=buildkite-native; else target=unknown; fi
+    ;;
+  :circleci)
+    if [[ "${CIRCLECI:-}" == true ]]; then target=circleci; else target=unknown; fi
     ;;
   *) target=unknown ;;
 esac
