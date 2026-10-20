@@ -273,7 +273,9 @@ record = {
   "timeline" => {
     "clock_note" => "Controller times use the orb clock; provider times use #{provider_clock}; in-job phase marks use the runner clock. Cross-clock differences carry clock-skew uncertainty.",
     "provider_field_mapping" => provider_field_mapping,
+    "controller_call_started_at" => controller["controller_call_started_at"] || "not recorded",
     "controller_trigger_requested_at" => controller["trigger_requested_at"] || "unknown",
+    "controller_trigger_first_http_send_at" => controller["trigger_first_http_send_at"] || "not recorded",
     "controller_trigger_accepted_at" => controller["trigger_accepted_at"] || "unknown",
     "provider_run_created_at" => run["created_at"] || "unknown",
     "provider_run_started_at" => run["run_started_at"] || "unknown",
@@ -290,16 +292,19 @@ record = {
     "controller_last_nonterminal_response_at" => observation["last_nonterminal_response_at"] || "not recorded",
     "controller_terminal_observed_at" => observation["observed_at"] || "not recorded",
     "controller_poll_interval_ms" => observation["poll_interval_ms"] || "not recorded",
+    "controller_poll_limiter" => observation["poll_limiter"] || "not recorded",
     "provider_terminal_boundary" => provider_terminal_boundary,
     "controller_request_to_accept_ms" => ms_between(controller["trigger_requested_at"], controller["trigger_accepted_at"]),
+    "controller_limiter_wait_before_send_ms" => controller["trigger_first_http_send_at"] ? ms_between(controller["trigger_requested_at"], controller["trigger_first_http_send_at"]) : "not recorded",
+    "controller_send_to_accept_ms" => controller["trigger_first_http_send_at"] ? ms_between(controller["trigger_first_http_send_at"], controller["trigger_accepted_at"]) : "not recorded",
     "controller_request_to_terminal_observed_ms" => ms_between(controller["trigger_requested_at"], observation["observed_at"]),
     "controller_accept_to_terminal_observed_ms" => ms_between(controller["trigger_accepted_at"], observation["observed_at"]),
     "provider_run_created_to_terminal_ms" => run["status"] == "completed" ? ms_between(run["created_at"], run["updated_at"]) : "unknown",
     "interval_clock_classes" => {
-      "same_clock_orb" => %w[controller_request_to_accept_ms controller_request_to_terminal_observed_ms controller_accept_to_terminal_observed_ms],
+      "same_clock_orb" => %w[controller_request_to_accept_ms controller_limiter_wait_before_send_ms controller_send_to_accept_ms controller_request_to_terminal_observed_ms controller_accept_to_terminal_observed_ms],
       "same_clock_provider" => %w[provider_queue_ms provider_job_ms provider_run_ms provider_run_created_to_terminal_ms],
       "cross_clock_estimate" => %w[controller_accept_to_job_completed_ms],
-      "note" => "Terminal observation intervals include up to one poll interval plus API latency after the provider terminal state; not recorded for samples collected after completion."
+      "note" => "Terminal observation intervals trail the provider terminal state by up to one poll interval plus, per poll, shared client rate-limiter wait (controller_poll_limiter), retry backoff, and API latency; not recorded for samples collected after completion. controller_request_to_accept_ms includes the client limiter wait before the first send (controller_limiter_wait_before_send_ms) when recorded; controller_send_to_accept_ms excludes it."
     }
   },
   "phases" => phases,

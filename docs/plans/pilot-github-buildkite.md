@@ -368,8 +368,20 @@ qualification `missing` while that volume exists.
     minute limit;
   - GitHub: 0.8 s, under 5,000 per hour.
 
-  Pollers run every 5 s. Read-only Buildkite requests retry 429s, 5xx, and
-  timeouts after Retry-After.
+  Every HTTP attempt passes through the lock, including retries. Read-only
+  Buildkite requests retry 429s, 5xx, and connection failures after
+  Retry-After. Pollers sleep 5 s between polls.
+- **Client delay is separated from provider time.** Each record has:
+  - `controller_call_started_at`;
+  - `trigger_requested_at`, taken before the limiter wait;
+  - `trigger_first_http_send_at`, taken after it.
+
+  Provenance reports `controller_limiter_wait_before_send_ms` and
+  `controller_send_to_accept_ms`. The terminal observation records the
+  limiter wait and attempts summed over polls, because observation lag
+  includes that wait, retry backoff, and API latency on top of the 5 s
+  sleep. Records from earlier controllers leave these fields
+  `not recorded`.
 - **Build creation is never blindly retried.** Only a 429 is retried. After
   any other failure, the controller looks up the build by its
   `CI_BENCH_REQUEST_ID` env instead of posting again. A reconciled build
@@ -377,7 +389,7 @@ qualification `missing` while that volume exists.
 - **Three revisions per sample:**
   - the measured source, in `comparison_group`;
   - `controller_revision`, the controller code that started and polled the
-    run, recorded at start;
+    run, captured once at controller start before any request;
   - `collector`.
 
   A running Bash controller keeps the code it started with, so its records

@@ -19,26 +19,39 @@ cd "$(dirname "$0")/../.."
 repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 
-# throttle NAME MIN_MS: spaces requests to one API across every controller on
-# this host (lock and timestamp under TMPDIR), bounding the aggregate rate.
+# throttle NAME MIN_MS: spaces every HTTP attempt to one API, including
+# retries, across all controllers on this host (lock and timestamp under
+# TMPDIR), bounding the aggregate rate. When CI_BENCH_LIMITER_LOG is set, each
+# call appends the milliseconds it waited, so records can separate client-side
+# delay from provider time.
 throttle() {
-  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now
+  local file="${TMPDIR:-/tmp}/ci-bench-$1.rate" min_ms="$2" fd last now waited=0
   exec {fd}>>"$file.lock"
   flock "$fd"
   last="$(cat "$file" 2>/dev/null || echo 0)"
   now="$(date +%s%3N)"
-  if (( now - last < min_ms )); then sleep "$(awk -v ms="$((min_ms - now + last))" 'BEGIN { print ms / 1000 }')"; fi
+  if (( now - last < min_ms )); then
+    waited=$((min_ms - now + last))
+    sleep "$(awk -v ms="$waited" 'BEGIN { print ms / 1000 }')"
+  fi
   date +%s%3N > "$file"
   exec {fd}>&-
+  if [[ -n "${CI_BENCH_LIMITER_LOG:-}" ]]; then echo "$waited" >> "$CI_BENCH_LIMITER_LOG"; fi
+}
+
+# limiter_summary FILE: total wait and attempt count logged by throttle.
+limiter_summary() {
+  awk '{ total += $1; n++ } END { printf "{\"wait_ms\": %d, \"attempts\": %d}", total, n }' "$1" 2>/dev/null || echo '{"wait_ms": 0, "attempts": 0}'
 }
 
 # GitHub allows 5,000 REST requests per hour; 800 ms spacing keeps all
 # controllers together under 4,500.
 ghapi() { throttle github 800; gh api "$@"; }
 
-# Revision of the controller code that started this run. A running Bash
-# controller keeps the definitions it started with, so this can differ from
-# both the measured SHA and a later collector.
+# Revision of the controller code that started this run, captured once at
+# controller start before any request. A running Bash controller keeps the
+# definitions it started with, so this can differ from both the measured SHA
+# and a later collector.
 controller_revision() {
   jq -n --arg sha "$(git rev-parse HEAD)" --argjson dirty "$([[ -z "$(git status --porcelain -- bin/ci)" ]] && echo false || echo true)" \
     '{sha: $sha, bin_ci_dirty: $dirty}'
@@ -72,8 +85,12 @@ probe() {
 # the controller's first terminal observation on the orb clock, then collects.
 run_workflow() {
   local workflow="$1" sha="$2" profile="$3" inputs="$4" poll_interval_ms=5000
+  local call_started_at revision scratch
+  call_started_at="$(iso_now)"
+  revision="$(controller_revision)"
+  scratch="$(mktemp -d)"
   verify_pilot_tag "$sha"
-  local body requested_at response accepted_at run_id dir status last_pending_at observed_at polls=0 target
+  local body requested_at first_send_at response accepted_at run_id dir status last_pending_at observed_at polls=0 target
   case "$(jq -r .runner <<<"$inputs")" in
     ubuntu-24.04) target=github-actions ;;
     blacksmith-*) target=blacksmith ;;
@@ -82,23 +99,29 @@ run_workflow() {
     *) echo "unsupported runner label" >&2; exit 2 ;;
   esac
   body="$(jq -n --arg ref "pilot/$sha" --argjson inputs "$inputs" '{ref: $ref, return_run_details: true, inputs: $inputs}')"
+  # requested_at precedes the limiter wait; first_send_at follows it.
   requested_at="$(iso_now)"
-  response="$(ghapi --method POST "repos/$repo/actions/workflows/$workflow/dispatches" --input - <<<"$body")"
+  throttle github 800
+  first_send_at="$(iso_now)"
+  response="$(gh api --method POST "repos/$repo/actions/workflows/$workflow/dispatches" --input - <<<"$body")"
   accepted_at="$(iso_now)"
   run_id="$(jq -r .workflow_run_id <<<"$response")"
   dir="tmp/pilot-evidence/$run_id"
   mkdir -p "$dir"
-  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg workflow "$workflow" \
+  jq -n --arg call_started_at "$call_started_at" --arg first_send_at "$first_send_at" \
+    --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg workflow "$workflow" \
     --arg profile "$profile" --arg target "$target" --argjson inputs "$inputs" --argjson response "$response" \
-    --argjson controller_revision "$(controller_revision)" --argjson poll_interval_ms "$poll_interval_ms" \
+    --argjson controller_revision "$revision" --argjson poll_interval_ms "$poll_interval_ms" \
     '{controller_clock: "orb UTC", controller_revision: $controller_revision, poll_interval_ms: $poll_interval_ms,
       dispatch_ref: ("pilot/" + $inputs.expected_sha), target: $target, workflow: $workflow, profile: $profile,
-      trigger_requested_at: $requested_at, trigger_accepted_at: $accepted_at,
+      controller_call_started_at: $call_started_at, trigger_requested_at: $requested_at,
+      trigger_first_http_send_at: $first_send_at, trigger_accepted_at: $accepted_at,
       inputs: $inputs, dispatch_response: $response}' > "$dir/controller.json"
   jq -r '"\(.workflow_run_id) \(.html_url)"' <<<"$response"
   # The terminal state became visible between last_nonterminal_response_at
   # and observed_at, both on the orb clock.
   last_pending_at="$accepted_at"
+  export CI_BENCH_LIMITER_LOG="$scratch/poll-limiter.log"
   while :; do
     polls=$((polls + 1))
     status="$(ghapi "repos/$repo/actions/runs/$run_id" --jq .status || echo poll-error)"
@@ -109,11 +132,13 @@ run_workflow() {
     last_pending_at="$(iso_now)"
     sleep "$((poll_interval_ms / 1000))"
   done
+  unset CI_BENCH_LIMITER_LOG
   jq --arg observed_at "$observed_at" --arg last_pending_at "$last_pending_at" \
-    --argjson poll_interval_ms "$poll_interval_ms" --argjson polls "$polls" \
+    --argjson poll_interval_ms "$poll_interval_ms" --argjson polls "$polls" --argjson limiter "$(limiter_summary "$scratch/poll-limiter.log")" \
     '.terminal_observation = {observed_at: $observed_at, last_nonterminal_response_at: $last_pending_at,
-      poll_interval_ms: $poll_interval_ms, polls: $polls}' "$dir/controller.json" > "$dir/controller.json.new"
+      poll_interval_ms: $poll_interval_ms, polls: $polls, poll_limiter: $limiter}' "$dir/controller.json" > "$dir/controller.json.new"
   mv "$dir/controller.json.new" "$dir/controller.json"
+  rm -rf "$scratch"
   collect "$run_id" "$dir"
 }
 

@@ -39,6 +39,12 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal 63_500, valid.dig("timeline", "controller_request_to_terminal_observed_ms")
     assert_includes valid.dig("timeline", "interval_clock_classes", "cross_clock_estimate"), "controller_accept_to_job_completed_ms"
 
+    sent = provenance(probe: { "marker.txt" => "#{SHA}\n", "source.txt" => "#{SHA}\n" }, observation: observation,
+                      controller_extra: { "trigger_first_http_send_at" => "2026-10-20T00:00:01.800Z" })
+    assert_equal 300, sent.dig("timeline", "controller_limiter_wait_before_send_ms")
+    assert_equal 200, sent.dig("timeline", "controller_send_to_accept_ms")
+    assert_equal "not recorded", valid.dig("timeline", "controller_limiter_wait_before_send_ms")
+
     wrong = provenance(probe: { "marker.txt" => "#{"b" * 40}\n", "source.txt" => "#{SHA}\n" }, observation: observation)
     assert_equal ["completion marker missing or not the expected SHA"], wrong.fetch("invalid_reasons")
   end
@@ -80,7 +86,7 @@ class PilotProvenanceTest < Minitest::Test
 
   private
 
-  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil)
+  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil, controller_extra: {})
     digest ||= YAML.safe_load(`git -C #{ROOT} show #{SHA}:benchmark/manifest.yml`).dig("profiles", "smoke", "expected_verification_digest")
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "artifact"))
@@ -90,7 +96,7 @@ class PilotProvenanceTest < Minitest::Test
       target = buildkite&.fetch("native", false) ? "buildkite-native" : "buildkite-ghac"
       controller = controller.merge("target" => target, "provider_cache_volumes_before" => volumes) if buildkite
       controller = controller.merge("workflow" => "native-pilot.yml") if buildkite&.fetch("native", false)
-      write_json(dir, "controller.json", controller)
+      write_json(dir, "controller.json", controller.merge(controller_extra))
       if buildkite
         workload_key = buildkite["workload_key"] || (buildkite["native"] ? "native-pilot" : "gha-pilot")
         workload = { "step_key" => workload_key, "state" => "passed", "retried" => buildkite["retried"] || false,
