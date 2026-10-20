@@ -126,11 +126,12 @@ steps = (job["steps"] || []).map do |step|
   }
 end
 
+# The verification oracle comes from the measured commit's manifest, never the
+# collector checkout, so reprocessing with a newer collector cannot change it.
 expected_digest = nil
-manifest_path = File.expand_path("../../benchmark/manifest.yml", __dir__)
-if manifest_profile && File.exist?(manifest_path)
-  require "yaml"
-  expected_digest = YAML.safe_load_file(manifest_path).dig("profiles", manifest_profile, "expected_verification_digest")
+measured_manifest = expected_sha.match?(/\A[0-9a-f]{40}\z/) ? `git -C #{repo_root} show #{expected_sha}:benchmark/manifest.yml 2>/dev/null` : ""
+if manifest_profile && !probe && !measured_manifest.empty?
+  expected_digest = YAML.safe_load(measured_manifest).dig("profiles", manifest_profile, "expected_verification_digest")
 end
 
 docker_local = runner["docker_endpoint"].to_s.start_with?("unix://") &&
@@ -153,11 +154,40 @@ else
   issues << "Docker builder is not verified local (endpoint #{runner["docker_endpoint"].inspect}, driver #{runner["docker_builder"].inspect})" unless docker_local
   issues << "cache expectation not met" unless cache["cache_expectation"] == "met"
   issues << "workload result missing or not passed" unless result&.fetch("status", nil) == "passed"
+  issues << "expected verification digest unavailable from the measured commit's manifest" unless expected_digest
   issues << "verification digest mismatch" if result && expected_digest && result.dig("verification", "digest") != expected_digest
   issues << "source tree dirty" if result && result["git_dirty"] != false
 end
 issues << "artifact checksums #{checksums}" unless checksums == "verified"
 issues << "run attempt is not 1 or a job was retried" unless run["run_attempt"] == 1
+
+# Provider clock and field names differ by target; the normalized run/job keys
+# above map onto these provider fields.
+if build
+  provider_clock = "Buildkite REST API timestamps (second or sub-second precision)"
+  provider_field_mapping = {
+    "provider_run_created_at" => "build.created_at", "provider_run_started_at" => "build.started_at",
+    "provider_run_updated_at" => "build.finished_at", "provider_job_queued_at" => "workload job runnable_at",
+    "provider_job_started_at" => "workload job started_at", "provider_job_completed_at" => "workload job finished_at"
+  }
+  provider_terminal_boundary = {
+    "job_finished_at" => job["completed_at"] || "unknown",
+    "build_finished_at" => build["finished_at"] || "unknown",
+    "note" => "Buildkite build finished_at is the provider terminal timestamp; it includes the GHAC concurrency finish step after the workload job."
+  }
+else
+  provider_clock = "GitHub REST API timestamps (1 s precision)"
+  provider_field_mapping = {
+    "provider_run_created_at" => "run.created_at", "provider_run_started_at" => "run.run_started_at",
+    "provider_run_updated_at" => "run.updated_at", "provider_job_queued_at" => "job.created_at",
+    "provider_job_started_at" => "job.started_at", "provider_job_completed_at" => "job.completed_at"
+  }
+  provider_terminal_boundary = {
+    "job_completed_at" => job["completed_at"] || "unknown",
+    "completed_run_updated_at" => run["status"] == "completed" ? run["updated_at"] : "unknown",
+    "note" => "GitHub exposes no run completed_at; the completed run's updated_at is the latest provider-side terminal timestamp."
+  }
+end
 
 volumes_before = controller["provider_cache_volumes_before"]
 cold_qualification =
@@ -169,10 +199,10 @@ cold_qualification =
     "benchmark-cold: exact dependency-cache miss verified; provider-owned caches unknown"
   elsif volumes_before.nil?
     "missing: cluster cache volumes were not recorded before the build"
-  elsif (other = volumes_before.map { |v| v["name"] || v["id"] }.reject { |n| ghac_toolchain_volumes.include?(n) }).any?
+  elsif (other = volumes_before.map { |v| v["tag"] || v["name"] || v["id"] }.reject { |n| ghac_toolchain_volumes.include?(n.to_s.split("/").last) }).any?
     "missing: cache volumes present before the build: #{other.join(", ")}"
   else
-    toolchain = volumes_before.any? { |v| ghac_toolchain_volumes.include?(v["name"]) } ? "present" : "absent"
+    toolchain = volumes_before.any? { |v| ghac_toolchain_volumes.include?((v["tag"] || v["name"]).to_s.split("/").last) } ? "present" : "absent"
     "benchmark-cold: exact dependency-cache miss verified; no container-cache or local-builder volumes before the build; GHAC toolchain volume #{toolchain}; other provider-owned caches unknown"
   end
 
@@ -191,7 +221,20 @@ record = {
     "result_git_dirty" => result&.fetch("git_dirty", nil),
     "workflow_blob" => workflow_blob.empty? ? "unknown" : workflow_blob
   },
-  "comparison_group" => "#{workflow_file}@#{workflow_blob.empty? ? "unknown" : workflow_blob[0, 12]}/#{manifest_profile}",
+  # Samples are compared only within one group: the full measured commit (which
+  # fixes workflow, harness, manifest, and lockfiles), workflow, and profile.
+  "comparison_group" => {
+    "key" => "#{expected_sha}:#{workflow_path}:#{manifest_profile}",
+    "measured_source_sha" => expected_sha,
+    "workflow_path" => workflow_path,
+    "workflow_blob" => workflow_blob.empty? ? "unknown" : workflow_blob,
+    "profile" => manifest_profile,
+    "expected_verification_digest" => expected_digest || (probe ? "not applicable" : "unknown")
+  },
+  "collector" => {
+    "sha" => `git -C #{repo_root} rev-parse HEAD 2>/dev/null`.strip,
+    "dirty" => !`git -C #{repo_root} status --porcelain -- bin/ci 2>/dev/null`.strip.empty?
+  },
   "graph" => {
     "workflow_logical_jobs" => logical_jobs,
     "provider_workload_jobs" => provider_workload_jobs,
@@ -221,7 +264,8 @@ record = {
     "labels" => job["labels"]
   },
   "timeline" => {
-    "clock_note" => "Controller times use the orb clock; provider times use GitHub; in-job phase marks use the runner clock. Cross-clock differences carry clock-skew uncertainty.",
+    "clock_note" => "Controller times use the orb clock; provider times use #{provider_clock}; in-job phase marks use the runner clock. Cross-clock differences carry clock-skew uncertainty.",
+    "provider_field_mapping" => provider_field_mapping,
     "controller_trigger_requested_at" => controller["trigger_requested_at"] || "unknown",
     "controller_trigger_accepted_at" => controller["trigger_accepted_at"] || "unknown",
     "provider_run_created_at" => run["created_at"] || "unknown",
@@ -239,11 +283,7 @@ record = {
     "controller_last_nonterminal_response_at" => observation["last_nonterminal_response_at"] || "not recorded",
     "controller_terminal_observed_at" => observation["observed_at"] || "not recorded",
     "controller_poll_interval_ms" => observation["poll_interval_ms"] || "not recorded",
-    "provider_terminal_boundary" => {
-      "job_completed_at" => job["completed_at"] || "unknown",
-      "completed_run_updated_at" => run["status"] == "completed" ? run["updated_at"] : "unknown",
-      "note" => "GitHub exposes no run completed_at; the completed run's updated_at is the latest provider-side terminal timestamp."
-    },
+    "provider_terminal_boundary" => provider_terminal_boundary,
     "controller_request_to_accept_ms" => ms_between(controller["trigger_requested_at"], controller["trigger_accepted_at"]),
     "controller_request_to_terminal_observed_ms" => ms_between(controller["trigger_requested_at"], observation["observed_at"]),
     "controller_accept_to_terminal_observed_ms" => ms_between(controller["trigger_accepted_at"], observation["observed_at"]),

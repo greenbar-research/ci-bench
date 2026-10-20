@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Installs the Ubuntu packages the full workload needs that a runner image may
+# lack, and records which were missing in tmp/pilot/system-packages.txt.
+# GitHub's runner image ships all of them; Buildkite's GHAC agent image lacks at
+# least libfontconfig1, which the pinned ImageMagick AppImage links against.
+# Shared libraries come from the AppImage's ELF NEEDED entries that it does not
+# bundle; build-essential compiles the native gems in Gemfile.lock.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+packages=(build-essential libx11-6 libfontconfig1 libfreetype6 libfribidi0 libharfbuzz0b)
+missing=()
+for package in "${packages[@]}"; do
+  dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed' || missing+=("$package")
+done
+mkdir -p tmp/pilot
+{
+  echo "required=${packages[*]}"
+  echo "missing=${missing[*]}"
+} > tmp/pilot/system-packages.txt
+cat tmp/pilot/system-packages.txt
+if (( ${#missing[@]} > 0 )); then
+  sudo apt-get update -qq
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
+fi
+docker compose version

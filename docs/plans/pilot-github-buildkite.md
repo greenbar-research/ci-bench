@@ -305,6 +305,29 @@ new comparison group, recorded in provenance as
 compared with the `16f944b` or `c8b087a` samples, which stay preserved
 unchanged.
 
+Revision R (`581be1b`) ran valid probes on GitHub and Buildkite. Buildkite
+full builds 3 and 4 then failed, for two different causes:
+
+- **Build 3:** the pipeline had workflow-authorized GitHub tokens disabled.
+  This was fixed in the ci-bench pipeline settings.
+- **Build 4:** the GHAC Ubuntu 24.04 agent image lacks `libfontconfig.so.1`,
+  which the pinned ImageMagick AppImage needs, so `magick` exited 127.
+
+R2 adds `bin/ci/pilot-system-deps` to the setup phase. It installs any missing
+system packages and records them in `system-packages.txt`:
+
+- `build-essential`;
+- the AppImage's non-bundled ELF dependencies (`libx11-6`, `libfontconfig1`,
+  `libfreetype6`, `libfribidi0`, `libharfbuzz0b`).
+
+It also checks `docker compose`. Because R2 changes the workflow again, every
+target restarts its matched stage at R2. The R samples stay preserved in
+their own comparison group.
+
+The comparison group is keyed by the full measured commit, workflow path, and
+profile. The verification oracle is read from the measured commit's
+manifest, so reprocessing with a later collector cannot change it.
+
 For each ready target, the stage runs at one immutable SHA:
 
 1. two orchestration probes;

@@ -11,7 +11,14 @@ class PilotProvenanceTest < Minitest::Test
   SHA = `git -C #{ROOT} rev-parse HEAD`.strip
 
   def test_valid_sample_requires_provider_success_and_local_builder
-    assert_equal [], provenance.fetch("invalid_reasons")
+    valid = provenance
+    assert_equal [], valid.fetch("invalid_reasons")
+    measured = YAML.safe_load(`git -C #{ROOT} show #{SHA}:benchmark/manifest.yml`).dig("profiles", "smoke", "expected_verification_digest")
+    assert_equal measured, valid.dig("comparison_group", "expected_verification_digest")
+    assert_equal "#{SHA}:.github/workflows/pilot.yml:smoke", valid.dig("comparison_group", "key")
+
+    wrong_digest = provenance(digest: "0" * 64)
+    assert_includes wrong_digest.fetch("invalid_reasons"), "verification digest mismatch"
 
     failed = provenance(run: { "conclusion" => "failure" }, job: { "conclusion" => "failure" })
     assert_equal false, failed.fetch("comparative_sample_valid")
@@ -37,10 +44,12 @@ class PilotProvenanceTest < Minitest::Test
   end
 
   def test_buildkite_build_requires_graph_parity_no_retries_and_recorded_cold_volumes
-    valid = provenance(buildkite: {}, volumes: [{ "name" => "buildkite-gha-linux-amd64" }])
+    valid = provenance(buildkite: {}, volumes: [{ "tag" => "01a15893-52af-4f15-98e9-7e88099b5337/buildkite-gha-linux-amd64" }])
     assert_equal [], valid.fetch("invalid_reasons")
     assert_equal "buildkite-ghac", valid.fetch("target")
     assert_equal 12_000, valid.dig("timeline", "provider_job_ms")
+    assert_match(/\ABuildkite /, valid.dig("timeline", "clock_note").split("provider times use ").last)
+    assert_equal "2026-10-20T00:00:21Z", valid.dig("timeline", "provider_terminal_boundary", "build_finished_at")
     assert_match(/\Abenchmark-cold: .*GHAC toolchain volume present/, valid.fetch("cold_qualification"))
 
     extra = provenance(buildkite: { "extra_jobs" => [{ "step_key" => "gha-other", "state" => "passed" }] }, volumes: [])
@@ -49,15 +58,15 @@ class PilotProvenanceTest < Minitest::Test
     retried = provenance(buildkite: { "retried" => true }, volumes: [])
     assert_includes retried.fetch("invalid_reasons"), "run attempt is not 1 or a job was retried"
 
-    cached = provenance(buildkite: {}, volumes: [{ "name" => "ci-bench/container-cache" }])
+    cached = provenance(buildkite: {}, volumes: [{ "tag" => "ci-bench/container-cache" }])
     assert_equal [], cached.fetch("invalid_reasons")
     assert_equal "missing: cache volumes present before the build: ci-bench/container-cache", cached.fetch("cold_qualification")
   end
 
   private
 
-  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil)
-    digest = YAML.safe_load_file(File.join(ROOT, "benchmark/manifest.yml")).dig("profiles", "smoke", "expected_verification_digest")
+  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil)
+    digest ||= YAML.safe_load(`git -C #{ROOT} show #{SHA}:benchmark/manifest.yml`).dig("profiles", "smoke", "expected_verification_digest")
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "artifact"))
       controller = { "trigger_requested_at" => "2026-10-20T00:00:01.500Z", "trigger_accepted_at" => "2026-10-20T00:00:02.000Z",

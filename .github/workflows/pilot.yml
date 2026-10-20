@@ -117,6 +117,9 @@ jobs:
         with:
           node-version: 24.18.0
 
+      - name: Install missing system packages
+        run: bin/ci/pilot-system-deps
+
       - name: Install pinned ImageMagick
         shell: bash
         run: |
