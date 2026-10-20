@@ -69,6 +69,8 @@ token_host() {
   host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"$url")"
   test_host="$(sed -E 's#^[a-z]+://([^/:]+).*#\1#' <<<"${CI_BENCH_CIRCLECI_API:-}")"
   if [[ -n "${CI_BENCH_CIRCLECI_API:-}" && "$host" == "$test_host" && "$url" == "${CI_BENCH_CIRCLECI_API%%/api/*}"* ]]; then return 0; fi
+  # Presigned step-output URLs carry their own authorization; never add the token.
+  [[ "$url" != *"/output/presigned/"* ]] || return 1
   [[ "$url" == https://* ]] && [[ "$host" == circleci.com || "$host" == output.circle-artifacts.com ]]
 }
 
