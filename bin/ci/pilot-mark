@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Records pilot phase boundaries in CI_BENCH_PHASES and in the job log.
+# Usage: bin/ci/pilot-mark phase:start [phase:end ...]
+set -euo pipefail
+
+now="$(date -u +%s%3N)"
+for spec in "$@"; do
+  phase="${spec%%:*}"
+  event="${spec##*:}"
+  printf '%s\t%s\t%s\n' "$now" "$phase" "$event" >> "${CI_BENCH_PHASES:?}"
+  echo "ci-bench-phase ${phase} ${event} ${now}"
+done

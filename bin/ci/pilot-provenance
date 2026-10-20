@@ -1,0 +1,158 @@
+#!/usr/bin/env ruby
+# Builds the companion provenance record for one pilot sample from evidence
+# collected by bin/ci/pilot-github. Uses only the Ruby standard library.
+#
+#   bin/ci/pilot-provenance EVIDENCE_DIR OBSERVED_AT > provenance.json
+require "json"
+require "time"
+
+dir, observed_at = ARGV
+abort "usage: pilot-provenance EVIDENCE_DIR OBSERVED_AT" unless dir && observed_at
+
+def read_json(path)
+  File.exist?(path) ? JSON.parse(File.read(path)) : nil
+end
+
+def read_env(path)
+  return {} unless File.exist?(path)
+
+  File.readlines(path, chomp: true).filter_map do |line|
+    key, value = line.split("=", 2)
+    [key, value] if key && value
+  end.to_h
+end
+
+def ms_between(start, finish)
+  return "unknown" unless start && finish
+
+  ((Time.iso8601(finish) - Time.iso8601(start)) * 1000).round
+end
+
+controller = read_json(File.join(dir, "controller.json")) || {}
+run = read_json(File.join(dir, "run.json")) || {}
+jobs = read_json(File.join(dir, "jobs.json"))&.fetch("jobs", []) || []
+artifact_dir = File.join(dir, "artifact")
+runner = read_env(File.join(artifact_dir, "runner.env"))
+cache = read_env(File.join(artifact_dir, "cache.env"))
+result = read_json(File.join(artifact_dir, "result.json"))
+checksums = File.exist?(File.join(dir, "artifact-checksums.txt")) ? File.read(File.join(dir, "artifact-checksums.txt")).strip : "unavailable"
+manifest_profile = controller.dig("inputs", "profile")
+
+# In-job phase boundaries come from the runner clock (epoch milliseconds).
+marks = Hash.new { |hash, key| hash[key] = {} }
+phases_path = File.join(artifact_dir, "phases.tsv")
+if File.exist?(phases_path)
+  File.readlines(phases_path, chomp: true).each do |line|
+    at, phase, event = line.split("\t")
+    marks[phase][event] ||= Integer(at)
+  end
+end
+phase_names = %w[checkout cache setup dependencies services workload artifact]
+phases = phase_names.to_h do |name|
+  start, finish = marks[name].values_at("start", "end")
+  [name, start && finish ? { "duration_ms" => finish - start, "started_at_ms" => start, "ended_at_ms" => finish } : "unknown"]
+end
+phases["artifact"] = { "note" => "upload duration is in provider step timings; in-job mark covers collection only" }.merge(phases["artifact"].is_a?(Hash) ? phases["artifact"] : { "duration_ms" => "unknown" })
+
+job = jobs.first || {}
+steps = (job["steps"] || []).map do |step|
+  {
+    "name" => step["name"],
+    "conclusion" => step["conclusion"],
+    "started_at" => step["started_at"],
+    "completed_at" => step["completed_at"],
+    "duration_ms" => ms_between(step["started_at"], step["completed_at"])
+  }
+end
+
+expected_digest = nil
+manifest_path = File.expand_path("../../benchmark/manifest.yml", __dir__)
+if manifest_profile && File.exist?(manifest_path)
+  require "yaml"
+  expected_digest = YAML.safe_load_file(manifest_path).dig("profiles", manifest_profile, "expected_verification_digest")
+end
+
+issues = []
+issues << "runner envelope mismatch" unless runner["envelope_match"] == "true"
+issues << "cache expectation not met" unless cache["cache_expectation"] == "met"
+issues << "workload result missing or not passed" unless result&.fetch("status", nil) == "passed"
+issues << "verification digest mismatch" if result && expected_digest && result.dig("verification", "digest") != expected_digest
+issues << "source SHA mismatch" unless run["head_sha"] && run["head_sha"] == controller.dig("inputs", "expected_sha") && runner["checkout_sha"] == run["head_sha"]
+issues << "source tree dirty" if result && result["git_dirty"] != false
+issues << "artifact checksums #{checksums}" unless checksums == "verified"
+issues << "run attempt is not 1" unless run["run_attempt"] == 1
+
+record = {
+  "record" => "ci-bench-pilot-provenance/v1",
+  "scored" => false,
+  "target" => runner["target"] || "unknown",
+  "repository" => run.dig("repository", "full_name"),
+  "workflow_path" => run["path"],
+  "source" => {
+    "expected_sha" => controller.dig("inputs", "expected_sha"),
+    "provider_head_sha" => run["head_sha"],
+    "checkout_sha" => runner["checkout_sha"],
+    "result_commit_sha" => result&.fetch("commit_sha", nil),
+    "result_git_dirty" => result&.fetch("git_dirty", nil)
+  },
+  "inputs" => controller["inputs"],
+  "provider" => {
+    "run_id" => run["id"],
+    "run_attempt" => run["run_attempt"],
+    "run_url" => run["html_url"],
+    "job_id" => job["id"],
+    "job_url" => job["html_url"],
+    "status" => run["status"],
+    "conclusion" => run["conclusion"],
+    "job_conclusion" => job["conclusion"],
+    "runner_name" => job["runner_name"],
+    "runner_group" => job["runner_group_name"],
+    "labels" => job["labels"]
+  },
+  "timeline" => {
+    "clock_note" => "Controller times use the orb clock; provider times use GitHub; in-job phase marks use the runner clock. Cross-clock differences carry clock-skew uncertainty.",
+    "controller_trigger_requested_at" => controller["trigger_requested_at"] || "unknown",
+    "controller_trigger_accepted_at" => controller["trigger_accepted_at"] || "unknown",
+    "provider_run_created_at" => run["created_at"] || "unknown",
+    "provider_run_started_at" => run["run_started_at"] || "unknown",
+    "provider_job_queued_at" => job["created_at"] || "unknown",
+    "provider_job_started_at" => job["started_at"] || "unknown",
+    "provider_job_completed_at" => job["completed_at"] || "unknown",
+    "provider_run_updated_at" => run["updated_at"] || "unknown",
+    "collector_observed_at" => observed_at,
+    "provider_queue_ms" => ms_between(job["created_at"], job["started_at"]),
+    "provider_job_ms" => ms_between(job["started_at"], job["completed_at"]),
+    "provider_run_ms" => ms_between(run["run_started_at"], job["completed_at"]),
+    "controller_accept_to_job_completed_ms" => ms_between(controller["trigger_accepted_at"], job["completed_at"])
+  },
+  "phases" => phases,
+  "provider_steps" => steps,
+  "runner" => runner,
+  "cache" => cache.merge(
+    "provider_owned_unknowns" => [
+      "runner image tool cache contents",
+      "Docker base-image layers present on the host image",
+      "package mirror and network caches",
+      "Playwright download CDN and apt mirror caches"
+    ],
+    "qualification" => "benchmark-cold only: explicit dependency cache keyed by cache_epoch; provider-owned caches cannot be flushed"
+  ),
+  "result" => result && {
+    "status" => result["status"],
+    "error" => result["error"],
+    "target" => result["target"],
+    "profile" => result["profile"],
+    "duration_ms" => result.dig("timeline", "duration_ms"),
+    "verification_digest" => result.dig("verification", "digest"),
+    "expected_verification_digest" => expected_digest,
+    "workloads" => result["workloads"].map { |w| w.slice("name", "status", "duration_ms") }
+  },
+  "evidence" => {
+    "artifact_checksums" => checksums,
+    "retained_in" => "GitHub Actions artifact plus controller-local tmp/pilot-evidence"
+  },
+  "comparative_sample_valid" => issues.empty?,
+  "invalid_reasons" => issues
+}
+
+puts JSON.pretty_generate(record)

@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Controller for the unscored GitHub Actions pilot.
+#
+#   bin/ci/pilot-github dispatch PROFILE CACHE_PHASE CACHE_EPOCH EXPECTED_SHA
+#   bin/ci/pilot-github collect RUN_ID [EVIDENCE_DIR]
+#
+# dispatch records controller clock request/acceptance times and the run ID
+# returned by the workflow dispatch API. collect records provider IDs and
+# boundaries, the in-job artifact, sanitized logs, and a provenance record.
+# Evidence stays local under tmp/pilot-evidence (gitignored) unless copied.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
+workflow=pilot.yml
+now_ms() { date -u +%s%3N; }
+iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+dispatch() {
+  local profile="$1" phase="$2" epoch="$3" sha="$4"
+  local remote_sha
+  remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
+  if [[ "$remote_sha" != "$sha" ]]; then
+    echo "origin main is $remote_sha, not expected $sha; refusing to dispatch" >&2
+    exit 1
+  fi
+  local body requested_at response accepted_at run_id dir
+  body="$(jq -n --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" \
+    '{ref: "main", return_run_details: true, inputs: {profile: $profile,
+      cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha}}')"
+  requested_at="$(iso_now)"
+  response="$(gh api --method POST "repos/$repo/actions/workflows/$workflow/dispatches" --input - <<<"$body")"
+  accepted_at="$(iso_now)"
+  run_id="$(jq -r .workflow_run_id <<<"$response")"
+  dir="tmp/pilot-evidence/$run_id"
+  mkdir -p "$dir"
+  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" \
+    --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" \
+    --argjson response "$response" \
+    '{controller_clock: "orb UTC", trigger_requested_at: $requested_at,
+      trigger_accepted_at: $accepted_at, inputs: {profile: $profile,
+      cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha},
+      dispatch_response: $response}' > "$dir/controller.json"
+  jq -r '.dispatch_response | "\(.workflow_run_id) \(.html_url)"' "$dir/controller.json"
+}
+
+sanitize() {
+  # GitHub masks registered secrets; also strip bearer/basic tokens and
+  # GitHub token formats defensively before evidence leaves the runner.
+  sed -E \
+    -e 's/(gh[pousr]_)[A-Za-z0-9]{20,}/\1[REDACTED]/g' \
+    -e 's/(github_pat_)[A-Za-z0-9_]{20,}/\1[REDACTED]/g' \
+    -e 's/(AUTHORIZATION: (basic|bearer) )[^ ]+/\1[REDACTED]/Ig'
+}
+
+collect() {
+  local run_id="$1" dir="${2:-tmp/pilot-evidence/$1}"
+  mkdir -p "$dir"
+  local observed_at
+  observed_at="$(iso_now)"
+  gh api "repos/$repo/actions/runs/$run_id" > "$dir/run.json"
+  gh api "repos/$repo/actions/runs/$run_id/jobs?filter=all" > "$dir/jobs.json"
+  gh api "repos/$repo/actions/runs/$run_id/artifacts" > "$dir/artifacts.json"
+  gh api "repos/$repo/actions/runs/$run_id/logs" > "$dir/logs.zip" 2>/dev/null || rm -f "$dir/logs.zip"
+  if [[ -f "$dir/logs.zip" ]]; then
+    rm -rf "$dir/logs"
+    mkdir -p "$dir/logs"
+    unzip -q -o "$dir/logs.zip" -d "$dir/logs.raw"
+    (cd "$dir/logs.raw" && find . -type f -print0) | while IFS= read -r -d '' file; do
+      mkdir -p "$dir/logs/$(dirname "$file")"
+      sanitize < "$dir/logs.raw/$file" > "$dir/logs/$file"
+    done
+    rm -rf "$dir/logs.raw" "$dir/logs.zip"
+  fi
+  local artifact_name
+  artifact_name="$(jq -r '.artifacts[0].name // empty' "$dir/artifacts.json")"
+  if [[ -n "$artifact_name" ]]; then
+    rm -rf "$dir/artifact"
+    gh run download "$run_id" --repo "$repo" --name "$artifact_name" --dir "$dir/artifact"
+    (cd "$dir/artifact" && sha256sum --check --quiet SHA256SUMS) \
+      && echo verified > "$dir/artifact-checksums.txt" \
+      || echo failed > "$dir/artifact-checksums.txt"
+  fi
+  ruby bin/ci/pilot-provenance "$dir" "$observed_at" > "$dir/provenance.json"
+  jq . "$dir/provenance.json"
+}
+
+case "${1:-}" in
+  dispatch) shift; dispatch "$@" ;;
+  collect) shift; collect "$@" ;;
+  *) sed -n '2,12p' "$0" >&2; exit 2 ;;
+esac

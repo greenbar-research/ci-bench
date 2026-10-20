@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Records runner identity for the unscored pilot and enforces its envelope:
+# exact source SHA, x86-64 Ubuntu 24.04, 4 CPUs, nominal 16 GB, enough disk.
+# Writes tmp/pilot/runner.env plus raw tmp/pilot/runner/*.txt. It exits non-zero
+# after recording facts when the runner or source does not match.
+set -uo pipefail
+
+cd "$(dirname "$0")/../.."
+out=tmp/pilot
+raw="$out/runner"
+mkdir -p "$raw"
+env_file="$out/runner.env"
+: > "$env_file"
+failures=()
+
+fact() { printf '%s=%s\n' "$1" "$2" >> "$env_file"; }
+capture() {
+  local name="$1"
+  shift
+  if "$@" > "$raw/$name.txt" 2>&1; then
+    return 0
+  fi
+  echo "unavailable: $*" >> "$raw/$name.txt"
+  return 1
+}
+
+# Target identity. GitHub-hosted jobs report github-hosted; Buildkite GitHub
+# Actions compatibility jobs report self-hosted (see docs/plans/pilot-github-buildkite.md).
+case "${RUNNER_ENVIRONMENT:-}" in
+  github-hosted) target=github-actions ;;
+  self-hosted)
+    if [[ "${BUILDKITE:-}" == "true" || -n "${BUILDKITE_BUILD_ID:-}" ]]; then
+      target=buildkite-ghac
+    else
+      target=unknown
+    fi
+    ;;
+  *) target=unknown ;;
+esac
+[[ "$target" == unknown ]] && failures+=("target provider could not be identified")
+fact target "$target"
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  printf 'CI_BENCH_TARGET=%s\nBENCH_TARGET=%s\n' "$target" "$target" >> "$GITHUB_ENV"
+fi
+
+# Source identity.
+checkout_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+fact expected_sha "${CI_BENCH_EXPECTED_SHA:-}"
+fact checkout_sha "$checkout_sha"
+fact github_sha "${GITHUB_SHA:-unknown}"
+if [[ ! "${CI_BENCH_EXPECTED_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+  failures+=("expected_sha is not a full lowercase commit SHA")
+elif [[ "$checkout_sha" != "$CI_BENCH_EXPECTED_SHA" ]]; then
+  failures+=("checkout $checkout_sha does not match expected ${CI_BENCH_EXPECTED_SHA}")
+fi
+
+# Hardware and image.
+arch="$(uname -m)"
+kernel="$(uname -r)"
+cpu_count="$(nproc)"
+cpu_model="$(awk -F': *' '/^model name/ { print $2; exit }' /proc/cpuinfo)"
+mem_total_bytes="$(( $(awk '/^MemTotal:/ { print $2 }' /proc/meminfo) * 1024 ))"
+disk_available_bytes="$(df -B1 --output=avail . | tail -1 | tr -d ' ')"
+disk_total_bytes="$(df -B1 --output=size . | tail -1 | tr -d ' ')"
+filesystem="$(df --output=fstype . | tail -1 | tr -d ' ')"
+os_id="$(. /etc/os-release && echo "$ID")"
+os_version="$(. /etc/os-release && echo "$VERSION_ID")"
+fact arch "$arch"
+fact kernel "$kernel"
+fact cpu_count "$cpu_count"
+fact cpu_model "$cpu_model"
+fact mem_total_bytes "$mem_total_bytes"
+fact disk_total_bytes "$disk_total_bytes"
+fact disk_available_bytes "$disk_available_bytes"
+fact filesystem "$filesystem"
+fact os_id "$os_id"
+fact os_version "$os_version"
+fact image_os "${ImageOS:-unknown}"
+fact image_version "${ImageVersion:-unknown}"
+fact runner_name "${RUNNER_NAME:-unknown}"
+fact runner_environment "${RUNNER_ENVIRONMENT:-unknown}"
+capture uname uname -a
+capture os-release cat /etc/os-release
+capture lscpu lscpu
+capture meminfo cat /proc/meminfo
+capture df df -h .
+
+[[ "$arch" == x86_64 ]] || failures+=("architecture $arch is not x86_64")
+[[ "$cpu_count" -eq 4 ]] || failures+=("CPU count $cpu_count is not 4")
+[[ "$os_id" == ubuntu && "$os_version" == 24.04 ]] || failures+=("OS $os_id $os_version is not Ubuntu 24.04")
+# Nominal 16 GB: hosts report roughly 15.6 GiB after firmware and kernel reservations.
+if (( mem_total_bytes < 15 * 1024 ** 3 || mem_total_bytes > 17 * 1024 ** 3 )); then
+  failures+=("memory $mem_total_bytes bytes is outside the nominal 16 GB envelope")
+fi
+(( disk_available_bytes >= 14 * 1024 ** 3 )) || failures+=("available disk $disk_available_bytes bytes is below 14 GiB")
+
+# Docker builder locality: the full workload builds through this daemon.
+if capture docker-version docker version; then
+  fact docker_server_version "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
+  fact docker_storage_driver "$(docker info --format '{{.Driver}}' 2>/dev/null || echo unknown)"
+  fact docker_endpoint "$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || echo unknown)"
+  fact docker_builder "$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/ { print $2; exit }' || echo unknown)"
+  capture docker-info docker info
+  capture docker-buildx docker buildx ls
+  capture docker-images docker image ls --digests
+else
+  fact docker_server_version unavailable
+  failures+=("docker daemon unavailable")
+fi
+
+fact envelope_match "$([[ ${#failures[@]} -eq 0 ]] && echo true || echo false)"
+printf '%s\n' "${failures[@]}" > "$out/envelope-failures.txt"
+cat "$env_file"
+if (( ${#failures[@]} > 0 )); then
+  printf 'pilot envelope mismatch: %s\n' "${failures[@]}" >&2
+  exit 1
+fi
