@@ -197,6 +197,13 @@ sanitize() {
     -e 's/(AUTHORIZATION: (basic|bearer|token) )[^ ]+/\1[REDACTED]/Ig'
 }
 
+# compiled_has_workflow: reads a compiled config on stdin and succeeds when its
+# top-level workflows map has an entry other than version.
+compiled_has_workflow() {
+  awk '/^workflows:/ { in_wf = 1; next } in_wf && /^[^ ]/ { in_wf = 0 }
+       in_wf && /^  [^ ]/ && $1 != "version:" { found = 1 } END { exit !found }'
+}
+
 # workflow_state PIPELINE_ID: prints "terminal" once the pipeline has errored
 # or its workflow has a final status. "failing" means a job failed while other
 # work may still run, so it is not terminal.
@@ -205,6 +212,13 @@ workflow_state() {
   pipeline="$(cc "$api/pipeline/$1")" || { echo poll-error; return; }
   if [[ "$(jq -r .state <<<"$pipeline")" == errored ]]; then echo terminal; return; fi
   workflows="$(cc "$api/pipeline/$1/workflow")" || { echo poll-error; return; }
+  # A created pipeline whose compiled config selects no workflow never gets
+  # one (for example, a tag pipeline without tag filters); that is terminal.
+  if [[ "$(jq -r .state <<<"$pipeline")" == created && "$(jq '.items | length' <<<"$workflows")" == 0 ]]; then
+    local config
+    config="$(cc "$api/pipeline/$1/config")" || { echo poll-error; return; }
+    if ! jq -r '.compiled // ""' <<<"$config" | compiled_has_workflow; then echo terminal; return; fi
+  fi
   jq -r 'if (.items | length) == 0 then "pending"
          elif all(.items[]; .status | IN("success", "failed", "error", "canceled", "unauthorized", "not_run")) then "terminal"
          else .items[0].status end' <<<"$workflows"

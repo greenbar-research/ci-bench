@@ -110,7 +110,14 @@ workflows:
         - not:
             equal: ["", << pipeline.parameters.expected_sha >>]
     jobs:
-      - probe
+      - probe:
+          # CircleCI runs no job in a tag pipeline without tag filters; the
+          # controller pins config and checkout to the immutable pilot tag.
+          filters:
+            tags:
+              only: /^pilot\/[0-9a-f]{40}$/
+            branches:
+              ignore: /.*/
   pilot:
     when:
       and:
@@ -118,4 +125,11 @@ workflows:
         - not:
             equal: ["", << pipeline.parameters.expected_sha >>]
     jobs:
-      - pilot
+      - pilot:
+          # CircleCI runs no job in a tag pipeline without tag filters; the
+          # controller pins config and checkout to the immutable pilot tag.
+          filters:
+            tags:
+              only: /^pilot\/[0-9a-f]{40}$/
+            branches:
+              ignore: /.*/
