@@ -28,7 +28,9 @@ bk() {
   local url="$1"
   shift
   : "${BUILDKITE_API_TOKEN:?BUILDKITE_API_TOKEN is not loaded}"
-  curl --fail --silent --show-error -K - "$@" "$url" <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\""
+  # Buildkite allows 50 REST requests per user per minute; curl retries 429s
+  # after the server's Retry-After.
+  curl --fail --silent --show-error --retry 8 --retry-max-time 180 -K - "$@" "$url" <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\""
 }
 
 sanitize() {
@@ -91,12 +93,12 @@ run() {
       break
     fi
     last_pending_at="$(iso_now)"
-    sleep 2
+    sleep 5
   done
   jq --arg observed_at "$observed_at" --arg last_pending_at "$last_pending_at" --argjson polls "$polls" \
     --argjson volumes "$(volumes)" \
     '.terminal_observation = {observed_at: $observed_at, last_nonterminal_response_at: $last_pending_at,
-      poll_interval_ms: 2000, polls: $polls} | .provider_cache_volumes_after = $volumes' \
+      poll_interval_ms: 5000, polls: $polls} | .provider_cache_volumes_after = $volumes' \
     "$dir/controller.json" > "$dir/controller.json.new"
   mv "$dir/controller.json.new" "$dir/controller.json"
   collect "$number" "$dir"
