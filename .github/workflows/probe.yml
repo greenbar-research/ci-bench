@@ -10,21 +10,29 @@ on:
         description: Full commit SHA the dispatched ref must resolve to
         required: true
         type: string
+      runner:
+        description: runs-on label; ubuntu-24.04 for GitHub-hosted and Buildkite GHAC, or a provider's 4 vCPU / 16 GB Ubuntu 24.04 label
+        required: false
+        default: ubuntu-24.04
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-bench-pilot
+  group: ci-bench-pilot-${{ inputs.runner }}
   cancel-in-progress: false
 
 jobs:
   probe:
     name: Orchestration probe
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     env:
       CI_BENCH_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      CI_BENCH_RUNNER: ${{ inputs.runner }}
+      # Keep Docker builds on the job host on every target (see the pilot plan).
+      BUILDX_BUILDER: default
 
     steps:
       - name: Mark job start

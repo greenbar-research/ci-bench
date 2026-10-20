@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Controller for the unscored Buildkite GHAC pilot.
+#
+#   bin/ci/pilot-buildkite run probe.yml EXPECTED_SHA
+#   bin/ci/pilot-buildkite run pilot.yml EXPECTED_SHA PROFILE CACHE_PHASE CACHE_EPOCH
+#   bin/ci/pilot-buildkite collect BUILD_NUMBER [EVIDENCE_DIR]
+#
+# run records the cluster cache volumes, creates a build through the REST API
+# with CI_BENCH_* build env (read by bin/ci/pilot-bk-import), records the
+# controller request/acceptance times, polls every 2 s to the controller's
+# first terminal observation, records the volumes again, and collects.
+# BUILDKITE_API_TOKEN comes from a private Amp secret and is passed to curl on
+# stdin, never on the command line. Evidence stays under tmp/pilot-evidence.
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+org="${CI_BENCH_BUILDKITE_ORG:-greenbardev}"
+pipeline="${CI_BENCH_BUILDKITE_PIPELINE:-ci-bench}"
+cluster="${CI_BENCH_BUILDKITE_CLUSTER:-ab509202-9130-4b55-975d-329bf3a74c64}"
+repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
+api="https://api.buildkite.com/v2/organizations/$org"
+iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+# bk URL [curl args...]: authenticated request; the header is read from stdin.
+bk() {
+  local url="$1"
+  shift
+  : "${BUILDKITE_API_TOKEN:?BUILDKITE_API_TOKEN is not loaded}"
+  curl --fail --silent --show-error -K - "$@" "$url" <<<"header = \"Authorization: Bearer $BUILDKITE_API_TOKEN\""
+}
+
+sanitize() {
+  sed -E \
+    -e 's/(bkua_|bkat_)[A-Za-z0-9]{20,}/\1[REDACTED]/g' \
+    -e 's/(gh[pousr]_)[A-Za-z0-9]{20,}/\1[REDACTED]/g' \
+    -e 's/(github_pat_)[A-Za-z0-9_]{20,}/\1[REDACTED]/g' \
+    -e 's/(AUTHORIZATION: (basic|bearer|token) )[^ ]+/\1[REDACTED]/Ig'
+}
+
+volumes() { bk "$api/clusters/$cluster/cache_volumes"; }
+
+run() {
+  local workflow="$1" sha="$2" profile="${3:-probe}" phase="${4:-}" epoch="${5:-}"
+  local remote_sha
+  remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
+  if [[ "$remote_sha" != "$sha" ]]; then
+    echo "origin main is $remote_sha, not expected $sha; refusing to create a build" >&2
+    exit 1
+  fi
+  case "$workflow" in
+    probe.yml) [[ "$profile" == probe ]] || { echo "probe.yml takes no profile" >&2; exit 2; } ;;
+    pilot.yml) [[ -n "$phase" && -n "$epoch" ]] || { echo "pilot.yml needs PROFILE CACHE_PHASE CACHE_EPOCH" >&2; exit 2; } ;;
+    *) echo "workflow must be probe.yml or pilot.yml" >&2; exit 2 ;;
+  esac
+  local scratch volumes_before body requested_at response accepted_at number dir
+  scratch="$(mktemp -d)"
+  volumes_before="$(volumes)"
+  body="$scratch/body.json"
+  jq -n --arg sha "$sha" --arg workflow "$workflow" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
+    '{commit: $sha, branch: "main", message: "ci-bench unscored pilot \($workflow) \($profile) \($phase)",
+      env: ({CI_BENCH_WORKFLOW: $workflow, CI_BENCH_EXPECTED_SHA: $sha}
+        + (if $workflow == "pilot.yml" then {CI_BENCH_PROFILE: $profile, CI_BENCH_CACHE_PHASE: $phase, CI_BENCH_CACHE_EPOCH: $epoch} else {} end))}' > "$body"
+  requested_at="$(iso_now)"
+  response="$(bk "$api/pipelines/$pipeline/builds" -X POST -H 'Content-Type: application/json' --data-binary "@$body")"
+  accepted_at="$(iso_now)"
+  number="$(jq -r .number <<<"$response")"
+  dir="tmp/pilot-evidence/bk-$number"
+  mkdir -p "$dir"
+  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg workflow "$workflow" \
+    --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" \
+    --argjson response "$response" --argjson volumes "$volumes_before" \
+    '{controller_clock: "orb UTC", target: "buildkite-ghac", workflow: $workflow, profile: $profile,
+      trigger_requested_at: $requested_at, trigger_accepted_at: $accepted_at,
+      inputs: ({expected_sha: $sha, runner: "ubuntu-24.04"} + (if $workflow == "pilot.yml" then {profile: $profile, cache_phase: $phase, cache_epoch: $epoch} else {} end)),
+      provider_cache_volumes_before: $volumes,
+      dispatch_response: ($response | {id, number, web_url, state, commit, branch, created_at})}' > "$dir/controller.json"
+  rm -rf "$scratch"
+  jq -r '"\(.number) \(.web_url)"' <<<"$response"
+
+  local state last_pending_at observed_at polls=0
+  last_pending_at="$accepted_at"
+  while :; do
+    polls=$((polls + 1))
+    state="$(bk "$api/pipelines/$pipeline/builds/$number" | jq -r 'if .finished_at then "terminal" else .state end' || echo poll-error)"
+    if [[ "$state" == terminal ]]; then
+      observed_at="$(iso_now)"
+      break
+    fi
+    last_pending_at="$(iso_now)"
+    sleep 2
+  done
+  jq --arg observed_at "$observed_at" --arg last_pending_at "$last_pending_at" --argjson polls "$polls" \
+    --argjson volumes "$(volumes)" \
+    '.terminal_observation = {observed_at: $observed_at, last_nonterminal_response_at: $last_pending_at,
+      poll_interval_ms: 2000, polls: $polls} | .provider_cache_volumes_after = $volumes' \
+    "$dir/controller.json" > "$dir/controller.json.new"
+  mv "$dir/controller.json.new" "$dir/controller.json"
+  collect "$number" "$dir"
+}
+
+collect() {
+  local number="$1" dir="${2:-tmp/pilot-evidence/bk-$1}"
+  mkdir -p "$dir/logs"
+  local observed_at
+  observed_at="$(iso_now)"
+  bk "$api/pipelines/$pipeline/builds/$number" > "$dir/build.json"
+  bk "$api/pipelines/$pipeline/builds/$number/artifacts?per_page=100" > "$dir/artifacts.json"
+  jq -r '.jobs[] | select(.raw_log_url) | "\(.id)\t\(.step_key // .id)"' "$dir/build.json" |
+    while IFS=$'\t' read -r job_id key; do
+      bk "$api/pipelines/$pipeline/builds/$number/jobs/$job_id/log" | jq -r '.content // ""' | sanitize > "$dir/logs/$key.txt" || true
+    done
+  # The workload job's actions/upload-artifact output is one GHAC ZIP.
+  local workload_job download
+  workload_job="$(jq -r '[.jobs[] | select((.step_key // "") | test("^gha-") and (test("^gha-(importer|concurrency-)") | not))][0].id // empty' "$dir/build.json")"
+  download="$(jq -r --arg job "$workload_job" '[.[] | select(.job_id == $job and (.path | test("^buildkite-gha/v1/artifacts/.*\\.zip$")))] | if length == 1 then .[0].download_url else empty end' "$dir/artifacts.json")"
+  rm -rf "$dir/artifact"
+  if [[ -n "$download" ]]; then
+    bk "$download" --location --output "$dir/artifact.zip"
+    mkdir -p "$dir/artifact"
+    unzip -q -o "$dir/artifact.zip" -d "$dir/artifact"
+    rm -f "$dir/artifact.zip"
+    (cd "$dir/artifact" && sha256sum --check --quiet SHA256SUMS) \
+      && echo verified > "$dir/artifact-checksums.txt" \
+      || echo failed > "$dir/artifact-checksums.txt"
+  else
+    echo unavailable > "$dir/artifact-checksums.txt"
+  fi
+  ruby bin/ci/pilot-provenance "$dir" "$observed_at" > "$dir/provenance.json"
+  jq '{target, provider: .provider, comparative_sample_valid, invalid_reasons, cold_qualification}' "$dir/provenance.json"
+}
+
+case "${1:-}" in
+  run) shift; run "$@" ;;
+  collect) shift; collect "$@" ;;
+  volumes) volumes | jq . ;;
+  *) sed -n '2,13p' "$0" >&2; exit 2 ;;
+esac

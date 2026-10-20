@@ -1,74 +1,66 @@
 #!/usr/bin/env bash
 # Controller for the unscored GitHub Actions pilot.
 #
-#   bin/ci/pilot-github dispatch PROFILE CACHE_PHASE CACHE_EPOCH EXPECTED_SHA
+#   bin/ci/pilot-github dispatch PROFILE CACHE_PHASE CACHE_EPOCH EXPECTED_SHA [RUNNER]
 #   bin/ci/pilot-github collect RUN_ID [EVIDENCE_DIR]
-#   bin/ci/pilot-github probe EXPECTED_SHA
+#   bin/ci/pilot-github probe EXPECTED_SHA [RUNNER]
 #
-# dispatch records controller clock request/acceptance times and the run ID
-# returned by the workflow dispatch API. probe does the same for probe.yml,
-# polls to the controller's terminal observation, then collects. collect records provider IDs and
+# RUNNER is the runs-on label (default ubuntu-24.04, GitHub-hosted); runner
+# provider labels select those targets through the same workflows.
+#
+# dispatch (pilot.yml) and probe (probe.yml) record controller clock
+# request/acceptance times and the run ID returned by the workflow dispatch
+# API, poll to the controller's terminal observation, then collect. collect records provider IDs and
 # boundaries, the in-job artifact, sanitized logs, and a provenance record.
 # Evidence stays local under tmp/pilot-evidence (gitignored) unless copied.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
-workflow=pilot.yml
-now_ms() { date -u +%s%3N; }
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
 
 dispatch() {
-  local profile="$1" phase="$2" epoch="$3" sha="$4"
+  local profile="$1" phase="$2" epoch="$3" sha="$4" runner="${5:-ubuntu-24.04}"
+  run_workflow pilot.yml "$sha" "$profile" \
+    "$(jq -n --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" --arg runner "$runner" \
+      '{profile: $profile, cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha, runner: $runner}')"
+}
+
+probe() {
+  local sha="$1" runner="${2:-ubuntu-24.04}"
+  run_workflow probe.yml "$sha" probe "$(jq -n --arg sha "$sha" --arg runner "$runner" '{expected_sha: $sha, runner: $runner}')"
+}
+
+# run_workflow WORKFLOW SHA PROFILE INPUTS_JSON: dispatches, polls every 2 s to
+# the controller's first terminal observation on the orb clock, then collects.
+run_workflow() {
+  local workflow="$1" sha="$2" profile="$3" inputs="$4" poll_interval_ms=2000
   local remote_sha
   remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
   if [[ "$remote_sha" != "$sha" ]]; then
     echo "origin main is $remote_sha, not expected $sha; refusing to dispatch" >&2
     exit 1
   fi
-  local body requested_at response accepted_at run_id dir
-  body="$(jq -n --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" \
-    '{ref: "main", return_run_details: true, inputs: {profile: $profile,
-      cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha}}')"
+  local body requested_at response accepted_at run_id dir status last_pending_at observed_at polls=0 target
+  case "$(jq -r .runner <<<"$inputs")" in
+    ubuntu-24.04) target=github-actions ;;
+    blacksmith-*) target=blacksmith ;;
+    depot-*) target=depot ;;
+    namespace-*|nscloud-*) target=namespace ;;
+    *) echo "unsupported runner label" >&2; exit 2 ;;
+  esac
+  body="$(jq -n --argjson inputs "$inputs" '{ref: "main", return_run_details: true, inputs: $inputs}')"
   requested_at="$(iso_now)"
   response="$(gh api --method POST "repos/$repo/actions/workflows/$workflow/dispatches" --input - <<<"$body")"
   accepted_at="$(iso_now)"
   run_id="$(jq -r .workflow_run_id <<<"$response")"
   dir="tmp/pilot-evidence/$run_id"
   mkdir -p "$dir"
-  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" \
-    --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" --arg sha "$sha" \
-    --argjson response "$response" \
-    '{controller_clock: "orb UTC", trigger_requested_at: $requested_at,
-      trigger_accepted_at: $accepted_at, inputs: {profile: $profile,
-      cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha},
-      dispatch_response: $response}' > "$dir/controller.json"
-  jq -r '.dispatch_response | "\(.workflow_run_id) \(.html_url)"' "$dir/controller.json"
-}
-
-probe() {
-  # Dispatches the orchestration probe, then polls until the run is terminal
-  # so the controller records its own terminal observation on the orb clock.
-  local sha="$1" poll_interval_ms=2000
-  local remote_sha
-  remote_sha="$(gh api "repos/$repo/commits/main" --jq .sha)"
-  if [[ "$remote_sha" != "$sha" ]]; then
-    echo "origin main is $remote_sha, not expected $sha; refusing to dispatch" >&2
-    exit 1
-  fi
-  local body requested_at response accepted_at run_id dir status last_pending_at observed_at polls=0
-  body="$(jq -n --arg sha "$sha" '{ref: "main", return_run_details: true, inputs: {expected_sha: $sha}}')"
-  requested_at="$(iso_now)"
-  response="$(gh api --method POST "repos/$repo/actions/workflows/probe.yml/dispatches" --input - <<<"$body")"
-  accepted_at="$(iso_now)"
-  run_id="$(jq -r .workflow_run_id <<<"$response")"
-  dir="tmp/pilot-evidence/$run_id"
-  mkdir -p "$dir"
-  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg sha "$sha" \
-    --argjson response "$response" \
-    '{controller_clock: "orb UTC", workflow: "probe.yml", profile: "probe",
+  jq -n --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg workflow "$workflow" \
+    --arg profile "$profile" --arg target "$target" --argjson inputs "$inputs" --argjson response "$response" \
+    '{controller_clock: "orb UTC", target: $target, workflow: $workflow, profile: $profile,
       trigger_requested_at: $requested_at, trigger_accepted_at: $accepted_at,
-      inputs: {expected_sha: $sha}, dispatch_response: $response}' > "$dir/controller.json"
+      inputs: $inputs, dispatch_response: $response}' > "$dir/controller.json"
   jq -r '"\(.workflow_run_id) \(.html_url)"' <<<"$response"
   # The terminal state became visible between last_nonterminal_response_at
   # and observed_at, both on the orb clock.

@@ -27,24 +27,32 @@ on:
         description: Full commit SHA the dispatched ref must resolve to
         required: true
         type: string
+      runner:
+        description: runs-on label; ubuntu-24.04 for GitHub-hosted and Buildkite GHAC, or a provider's 4 vCPU / 16 GB Ubuntu 24.04 label
+        required: false
+        default: ubuntu-24.04
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-bench-pilot
+  group: ci-bench-pilot-${{ inputs.runner }}
   cancel-in-progress: false
 
 jobs:
   pilot:
     name: Pilot ${{ inputs.profile }} ${{ inputs.cache_phase }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 50
     env:
       CI_BENCH_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      CI_BENCH_RUNNER: ${{ inputs.runner }}
       CI_BENCH_PROFILE: ${{ inputs.profile }}
       CI_BENCH_CACHE_PHASE: ${{ inputs.cache_phase }}
       CI_BENCH_CACHE_EPOCH: ${{ inputs.cache_epoch }}
+      # Keep Docker builds on the job host on every target (see the pilot plan).
+      BUILDX_BUILDER: default
       BUNDLE_PATH: vendor/bundle
       BUNDLE_DEPLOYMENT: "true"
 
@@ -70,7 +78,7 @@ jobs:
         id: deps-cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          key: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+          key: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
           path: |
             vendor/bundle
             ~/.npm
@@ -79,7 +87,7 @@ jobs:
       - name: Check cache expectation
         env:
           CACHE_HIT: ${{ steps.deps-cache.outputs.cache-hit }}
-          CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+          CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
         run: |
           bin/ci/pilot-mark cache:end setup:start
           {

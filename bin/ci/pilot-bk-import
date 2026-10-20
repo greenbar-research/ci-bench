@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Buildkite importer for the unscored pilot. The stock GHAC plugin gives
+# REST-created builds an empty workflow_dispatch payload, so this step writes
+# an explicit event snapshot from the build env set by bin/ci/pilot-buildkite
+# and uploads the selected workflow through the pinned buildkite-gha runtime.
+#
+# Build env: CI_BENCH_WORKFLOW (pilot.yml or probe.yml), CI_BENCH_EXPECTED_SHA,
+# and for pilot.yml CI_BENCH_PROFILE, CI_BENCH_CACHE_PHASE, CI_BENCH_CACHE_EPOCH.
+set -euo pipefail
+
+version=0.105.1
+archive_sha256=a87844dd3ce3aba871b54c27fc2489614fe51e580364678c979b5754715613e2
+export BUILDKITE_GHA_TELEMETRY_DISABLED=true
+
+fail() { echo "pilot-bk-import: $*" >&2; exit 1; }
+
+workflow="${CI_BENCH_WORKFLOW:-}"
+sha="${CI_BENCH_EXPECTED_SHA:-}"
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "CI_BENCH_EXPECTED_SHA must be a full lowercase commit SHA"
+[[ "$(git rev-parse HEAD)" == "$sha" && "${BUILDKITE_COMMIT:-}" == "$sha" ]] \
+  || fail "checkout $(git rev-parse HEAD) / build commit ${BUILDKITE_COMMIT:-unset} do not match $sha"
+
+case "$workflow" in
+  probe.yml)
+    inputs="\"expected_sha\":\"$sha\",\"runner\":\"ubuntu-24.04\""
+    ;;
+  pilot.yml)
+    [[ "${CI_BENCH_PROFILE:-}" =~ ^(smoke|full)$ ]] || fail "CI_BENCH_PROFILE must be smoke or full"
+    [[ "${CI_BENCH_CACHE_PHASE:-}" =~ ^(cold|warm)$ ]] || fail "CI_BENCH_CACHE_PHASE must be cold or warm"
+    [[ "${CI_BENCH_CACHE_EPOCH:-}" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || fail "CI_BENCH_CACHE_EPOCH has unsupported characters"
+    inputs="\"profile\":\"$CI_BENCH_PROFILE\",\"cache_phase\":\"$CI_BENCH_CACHE_PHASE\",\"cache_epoch\":\"$CI_BENCH_CACHE_EPOCH\",\"expected_sha\":\"$sha\",\"runner\":\"ubuntu-24.04\""
+    ;;
+  *) fail "CI_BENCH_WORKFLOW must be pilot.yml or probe.yml" ;;
+esac
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+curl --fail --location --silent --show-error --output "$work/buildkite-gha.tar.gz" \
+  "https://github.com/buildkite/buildkite-gha/releases/download/v${version}/buildkite-gha_Linux_x86_64.tar.gz"
+echo "${archive_sha256}  $work/buildkite-gha.tar.gz" | sha256sum --check
+tar -xzf "$work/buildkite-gha.tar.gz" -C "$work" buildkite-gha
+
+# All values above are validated, so the snapshot needs no JSON escaping.
+mkdir -p tmp/ci-bench
+printf '{"provider":"github","event":"workflow_dispatch","repository":{"owner":"greenbar-research","name":"ci-bench","clone_url":"https://github.com/greenbar-research/ci-bench.git","default_branch":"main"},"ref":"refs/heads/main","sha":"%s","actor":"ci-bench-controller","payload":{"inputs":{%s}}}\n' \
+  "$sha" "$inputs" > tmp/ci-bench/event.json
+cat tmp/ci-bench/event.json
+buildkite-agent artifact upload tmp/ci-bench/event.json
+
+"$work/buildkite-gha" upload --event-path tmp/ci-bench/event.json \
+  --runner-queue ubuntu-24.04=linux-medium ".github/workflows/$workflow"

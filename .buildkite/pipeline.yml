@@ -1,11 +1,10 @@
 # Unscored Buildkite GitHub Actions compatibility (GHAC) pilot input.
-# Not yet runnable: requires a Greenbar Buildkite organization, a full-access
-# GitHub source integration for greenbar-research/ci-bench, and a hosted Linux
-# AMD64 4 vCPU / 16 GB Ubuntu 24.04 queue. See docs/plans/pilot-github-buildkite.md.
-#
-# Builds must be created manually or through the REST API with a
-# workflow_dispatch event snapshot; there is no shadow GitHub Actions run, so
-# Buildkite build/job IDs, timestamps, and artifacts are collected separately.
+# Builds are created only through the REST API by bin/ci/pilot-buildkite with
+# CI_BENCH_* build env; GitHub-triggered builds are disabled. The importer
+# writes an explicit workflow_dispatch event snapshot and uploads the selected
+# workflow with the pinned buildkite-gha runtime (see bin/ci/pilot-bk-import and
+# docs/plans/pilot-github-buildkite.md). There is no shadow GitHub Actions run,
+# so Buildkite build/job IDs, timestamps, and artifacts are collected separately.
 steps:
   - label: ":github: Import unscored pilot workflow"
     key: gha-importer
@@ -13,11 +12,4 @@ steps:
       queue: linux-medium
     env:
       BUILDKITE_GHA_TELEMETRY_DISABLED: "true"
-    plugins:
-      # Plugin code and buildkite-gha runtime are pinned separately.
-      - github-actions#98159d5e696d06b70df490b9d7d9eabc32bc2b21: # v0.13.0
-          workflow: .github/workflows/pilot.yml
-          version: 0.105.1
-          runners:
-            - runs-on: ubuntu-24.04
-              queue: linux-medium
+    command: bin/ci/pilot-bk-import

@@ -5,9 +5,10 @@ require "tmpdir"
 require "yaml"
 
 # Runs bin/ci/pilot-provenance against synthetic evidence; needs no database.
+# The expected SHA is this checkout's HEAD so workflow files resolve through git.
 class PilotProvenanceTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
-  SHA = "a" * 40
+  SHA = `git -C #{ROOT} rev-parse HEAD`.strip
 
   def test_valid_sample_requires_provider_success_and_local_builder
     assert_equal [], provenance.fetch("invalid_reasons")
@@ -35,18 +36,45 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal ["completion marker missing or not the expected SHA"], wrong.fetch("invalid_reasons")
   end
 
+  def test_buildkite_build_requires_graph_parity_no_retries_and_recorded_cold_volumes
+    valid = provenance(buildkite: {}, volumes: [{ "name" => "buildkite-gha-linux-amd64" }])
+    assert_equal [], valid.fetch("invalid_reasons")
+    assert_equal "buildkite-ghac", valid.fetch("target")
+    assert_equal 12_000, valid.dig("timeline", "provider_job_ms")
+    assert_match(/\Abenchmark-cold: .*GHAC toolchain volume present/, valid.fetch("cold_qualification"))
+
+    extra = provenance(buildkite: { "extra_jobs" => [{ "step_key" => "gha-other", "state" => "passed" }] }, volumes: [])
+    assert_equal 1, extra.fetch("invalid_reasons").grep(/job graph parity failed/).size
+
+    retried = provenance(buildkite: { "retried" => true }, volumes: [])
+    assert_includes retried.fetch("invalid_reasons"), "run attempt is not 1 or a job was retried"
+
+    cached = provenance(buildkite: {}, volumes: [{ "name" => "ci-bench/container-cache" }])
+    assert_equal [], cached.fetch("invalid_reasons")
+    assert_equal "missing: cache volumes present before the build: ci-bench/container-cache", cached.fetch("cold_qualification")
+  end
+
   private
 
-  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil)
+  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil)
     digest = YAML.safe_load_file(File.join(ROOT, "benchmark/manifest.yml")).dig("profiles", "smoke", "expected_verification_digest")
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "artifact"))
       controller = { "trigger_requested_at" => "2026-10-20T00:00:01.500Z", "trigger_accepted_at" => "2026-10-20T00:00:02.000Z",
-                     "inputs" => { "profile" => "smoke", "expected_sha" => SHA } }
+                     "inputs" => { "profile" => "smoke", "cache_phase" => "cold", "expected_sha" => SHA } }
       controller = controller.merge("profile" => "probe", "inputs" => { "expected_sha" => SHA }, "terminal_observation" => observation) if probe
+      controller = controller.merge("target" => "buildkite-ghac", "provider_cache_volumes_before" => volumes) if buildkite
       write_json(dir, "controller.json", controller)
-      write_json(dir, "run.json", { "status" => "completed", "conclusion" => "success", "head_sha" => SHA, "run_attempt" => 1 }.merge(run))
-      write_json(dir, "jobs.json", { "jobs" => [{ "conclusion" => "success" }.merge(job)] })
+      if buildkite
+        workload = { "step_key" => "gha-pilot", "state" => "passed", "retried" => buildkite["retried"] || false,
+                     "runnable_at" => "2026-10-20T00:00:05Z", "started_at" => "2026-10-20T00:00:08Z", "finished_at" => "2026-10-20T00:00:20Z" }
+        write_json(dir, "build.json", { "number" => 1, "state" => "passed", "commit" => SHA, "created_at" => "2026-10-20T00:00:02Z",
+                                        "started_at" => "2026-10-20T00:00:03Z", "finished_at" => "2026-10-20T00:00:21Z",
+                                        "jobs" => [{ "step_key" => "gha-importer", "state" => "passed" }, workload] + (buildkite["extra_jobs"] || []) })
+      else
+        write_json(dir, "run.json", { "status" => "completed", "conclusion" => "success", "head_sha" => SHA, "run_attempt" => 1 }.merge(run))
+        write_json(dir, "jobs.json", { "jobs" => [{ "conclusion" => "success" }.merge(job)] })
+      end
       if probe
         probe.each { |name, content| File.write(File.join(dir, "artifact", name), content) }
       else
@@ -54,7 +82,7 @@ class PilotProvenanceTest < Minitest::Test
           { "status" => "passed", "git_dirty" => false, "verification" => { "digest" => digest }, "workloads" => [] })
         File.write(File.join(dir, "artifact/cache.env"), "cache_expectation=met\n")
       end
-      runner_env = { "envelope_match" => "true", "checkout_sha" => SHA,
+      runner_env = { "target" => buildkite ? "buildkite-ghac" : "github-actions", "envelope_match" => "true", "checkout_sha" => SHA,
                      "docker_endpoint" => "unix:///var/run/docker.sock", "docker_builder" => "docker" }.merge(runner)
       File.write(File.join(dir, "artifact/runner.env"), runner_env.map { |k, v| "#{k}=#{v}\n" }.join)
       File.write(File.join(dir, "artifact-checksums.txt"), "verified\n")

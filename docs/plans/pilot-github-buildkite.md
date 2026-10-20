@@ -9,9 +9,10 @@ last_reviewed: 2026-10-20
 
 This slice prepares a small, unscored comparison between the same GitHub
 Actions workflow on GitHub-hosted runners and on Buildkite through GitHub
-Actions compatibility (GHAC). The GitHub side runs now. The Buildkite side
-stays blocked until a Greenbar Buildkite organization exists (see
-[Buildkite blocker](#buildkite-blocker)).
+Actions compatibility (GHAC). The same workflows also select runner providers
+through the `runner` input (see [Matched stage](#matched-stage-rebaseline)).
+The Buildkite prerequisites were resolved on 2026-10-20 (see
+[Buildkite blocker](#buildkite-blocker-resolved-2026-10-20)).
 
 The pilot does not rank providers, report p95 latency, or publish results.
 It produces raw, private evidence that shows whether the contract and
@@ -36,9 +37,14 @@ instrumentation are sound before larger runs.
     allocation is used up, so it has a separate allocation of at most two
     runs of `.github/workflows/probe.yml` (see
     [Orchestration probe](#orchestration-probe)).
-- **Shape:** one serial job per dispatch, and at most one active workload job,
-  which stays well below the limit of four. Concurrency group
-  `ci-bench-pilot` serializes dispatches.
+- **Shape:** one job per dispatch. Concurrency group
+  `ci-bench-pilot-<runner>` serializes dispatches per target, and the
+  controller keeps at most four workload jobs active across all targets.
+- **Targets:** the `runner` input selects `runs-on`. `ubuntu-24.04` is
+  GitHub-hosted, or Buildkite GHAC through `linux-medium`. Runner providers use
+  their own 4 vCPU / 16 GB Ubuntu 24.04 labels. `pilot-runner` derives the
+  target from the label and the runner environment, and provenance requires it
+  to match the controller's target.
 - **Runner envelope:** `bin/ci/pilot-runner` records the runner and enforces
   the envelope:
   - x86-64, Ubuntu 24.04, exactly 4 CPUs, 15–17 GiB of memory, and at least
@@ -147,8 +153,8 @@ Native adapters therefore run the exact releases, without fallback.
 | `actions/upload-artifact` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` (v7.0.1) | Native ZIP adapter; `artifact-url` empty on Buildkite |
 | `ruby/setup-ruby` | `824c0e29fdfc7d689c191c27acc969d2d04b7dd8` (v1.331.0) | Upstream JavaScript |
 | `actions/setup-node` | `249970729cb0ef3589644e2896645e5dc5ba9c38` (v6.5.0) | Upstream JavaScript; built-in caching disabled |
-| GHAC plugin | `github-actions#98159d5e696d06b70df490b9d7d9eabc32bc2b21` (v0.13.0) | Plugin code |
-| GHAC runtime | `buildkite-gha` `0.105.1` (Linux x86-64 archive SHA-256 `a87844dd…13e2`) | Runtime, pinned separately via `version` |
+| GHAC importer | `bin/ci/pilot-bk-import` (replaces plugin v0.13.0, which gives API-created builds an empty dispatch payload) | Writes the event snapshot and runs `buildkite-gha upload --event-path` |
+| GHAC runtime | `buildkite-gha` `0.105.1` (Linux x86-64 archive SHA-256 `a87844dd3ce3aba871b54c27fc2489614fe51e580364678c979b5754715613e2`) | Downloaded and verified by the importer |
 | Workload | the pilot commit, `benchmark/manifest.yml`, and lockfiles | Identical on every target |
 
 These decisions remove unsupported or ambiguous cache paths:
@@ -161,6 +167,18 @@ These decisions remove unsupported or ambiguous cache paths:
   different implementation behind the same logical key, not as equivalent
   infrastructure. Any additional Buildkite hosted cache volume is outside
   this contract and must not be added silently.
+- GHAC mounts its own toolchain volume, `buildkite-gha-linux-amd64`, on
+  generated jobs. It is recorded as a provider-owned cache.
+- Cluster container caching and Git mirrors are off. Onboarding attested this
+  on 2026-10-20; the setting is not visible through the API. The controller
+  records the cluster's cache volumes through the API before and after every
+  build.
+- A Buildkite cold sample is qualified benchmark-cold only when no volume
+  other than the GHAC toolchain volume existed before the build. Volumes are
+  never deleted.
+- Every target sets `BUILDX_BUILDER=default`. `pilot-runner` fails the job
+  unless the Docker endpoint is a unix socket and the driver is `docker` or
+  `docker-container`.
 - Pilot runs use `BUNDLE_PATH=vendor/bundle`, and the cached Playwright
   download directory is `~/.cache/ms-playwright`. GHAC runs generated Linux
   jobs as a dedicated `runner` user, so home-relative paths resolve under
@@ -187,11 +205,18 @@ Known GHAC behavioral differences to record when the Buildkite side runs:
   `GITHUB_RUN_ATTEMPT` contain Buildkite build values. Build IDs, job IDs,
   timestamps, and artifacts must come from the Buildkite REST API.
 - `RUNNER_ENVIRONMENT` is `self-hosted`, and the runner image is not
-  GitHub's. `pilot-runner` records the actual facts.
-- A `workflow_dispatch` build needs an explicit event snapshot or
-  authoritative event metadata. Server-side dispatch does not handle
-  `workflow_dispatch`, so builds use the explicit-workflow pipeline in
-  `.buildkite/pipeline.yml` and are created by the REST API with inputs.
+  GitHub's. Step processes get an allowlisted environment without
+  `BUILDKITE_*` variables. `pilot-runner` therefore identifies the host by the
+  `buildkite-agent` binary and records the actual facts.
+- A `workflow_dispatch` build needs an explicit event snapshot.
+  `bin/ci/pilot-buildkite` creates builds through the REST API with
+  `CI_BENCH_*` build env, and the importer turns that env into the snapshot.
+- The generated graph has three parts:
+  - the importer, on `linux-medium`, using the queue's default image;
+  - two concurrency gate steps, on the cluster default queue;
+  - one workload job per workflow job, keyed `gha-<job>`.
+
+  Graph parity requires exactly the workflow's jobs as workload jobs.
 - Ubuntu 24.04 selection maps explicitly to `linux-medium`. The queue must be
   a hosted Linux AMD64 4 vCPU / 16 GB queue, or the samples are invalid.
 
@@ -271,9 +296,48 @@ A probe sample is valid only if all of these hold:
 At most two probe runs are allowed. A failure is reported with its cause
 before any further run.
 
-## Buildkite blocker
+## Matched stage (rebaseline)
 
-As of 2026-10-20, this checkout and its environment have none of the
+The revision that added the Buildkite importer, `BUILDX_BUILDER=default`, and
+the `runner` input changed both workflow files. Its samples therefore form a
+new comparison group, recorded in provenance as
+`<workflow>@<workflow blob>/<profile>` and labelled a rebaseline. They are not
+compared with the `16f944b` or `c8b087a` samples, which stay preserved
+unchanged.
+
+For each ready target, the stage runs at one immutable SHA:
+
+1. two orchestration probes;
+2. two independent full pairs. Each pair is a benchmark-cold run followed by
+   a warm run, using a cache epoch unique to that target and pair.
+
+That is six runs per target, with at most four workload jobs active globally.
+
+Full runs are gated on all of the following from the target's probes and
+earlier runs:
+
+- exact source and useful work;
+- the 4 vCPU / 16 GB Ubuntu 24.04 envelope;
+- a local Docker builder;
+- job-graph parity.
+
+Failures are retained. A repeated identical failure stops that target.
+
+## Buildkite blocker (resolved 2026-10-20)
+
+Resolved on 2026-10-20. Onboarding set up the following:
+
+- org `greenbardev`, using its Default cluster, which is dedicated to this
+  pilot;
+- queue `linux-medium`, of shape `LINUX_AMD64_4X16`;
+- pipeline `ci-bench`, with GitHub triggers off;
+- a Buildkite GitHub App installation limited to this repository;
+- an org-scoped API token, delivered as the private Amp project secret
+  `BUILDKITE_API_TOKEN`.
+
+The original blocker follows.
+
+Before that, this checkout and its environment had none of the
 following:
 
 - Buildkite organization

@@ -39,6 +39,65 @@ checksums = File.exist?(File.join(dir, "artifact-checksums.txt")) ? File.read(Fi
 manifest_profile = controller["profile"] || controller.dig("inputs", "profile")
 probe = manifest_profile == "probe"
 observation = controller["terminal_observation"] || {}
+build = read_json(File.join(dir, "build.json"))
+controller_target = controller["target"] || (build ? "buildkite-ghac" : "github-actions")
+workflow_file = controller["workflow"] || (probe ? "probe.yml" : "pilot.yml")
+workflow_path = ".github/workflows/#{workflow_file}"
+# Toolchain volume the GHAC runtime itself mounts on generated jobs; recorded
+# as a provider-owned cache like GitHub's runner image tool cache.
+ghac_toolchain_volumes = %w[buildkite-gha-linux-amd64]
+
+# Buildkite builds are normalized into the GitHub run/job fields used below;
+# the raw build.json stays in the evidence directory.
+if build
+  build_jobs = build["jobs"] || []
+  workload_jobs = build_jobs.select { |j| j["step_key"].to_s.match?(/\Agha-(?!importer\z|concurrency-)/) }
+  bk_job = workload_jobs.first || {}
+  retried = build_jobs.any? { |j| j["retried"] || j["retry_source"] || j["retries_count"].to_i.positive? }
+  run = {
+    "id" => build["number"],
+    "status" => build["finished_at"] ? "completed" : build["state"],
+    "conclusion" => build["state"] == "passed" ? "success" : build["state"],
+    "head_sha" => build["commit"],
+    "run_attempt" => retried ? "retried" : 1,
+    "created_at" => build["created_at"],
+    "run_started_at" => build["started_at"],
+    "updated_at" => build["finished_at"],
+    "html_url" => build["web_url"],
+    "path" => workflow_path,
+    "repository" => { "full_name" => "greenbar-research/ci-bench" }
+  }
+  jobs = [{
+    "id" => bk_job["id"],
+    "conclusion" => bk_job["state"] == "passed" ? "success" : bk_job["state"],
+    "created_at" => bk_job["runnable_at"],
+    "started_at" => bk_job["started_at"],
+    "completed_at" => bk_job["finished_at"],
+    "html_url" => bk_job["web_url"],
+    "runner_name" => bk_job.dig("agent", "name"),
+    "labels" => bk_job["agent_query_rules"],
+    "steps" => []
+  }]
+  provider_workload_jobs = workload_jobs.map { |j| j["step_key"] }
+  provider_orchestration_jobs = (build_jobs - workload_jobs).map { |j| j["step_key"] || j["label"] || j["type"] }
+else
+  provider_workload_jobs = jobs.map { |j| j["name"] }
+  provider_orchestration_jobs = []
+end
+
+# Job-graph parity and the comparison group come from the workflow file at the
+# expected commit, so samples are compared only within one workflow revision.
+repo_root = File.expand_path("../..", __dir__)
+expected_sha = controller.dig("inputs", "expected_sha").to_s
+workflow_blob = expected_sha.match?(/\A[0-9a-f]{40}\z/) ? `git -C #{repo_root} rev-parse --verify --quiet #{expected_sha}:#{workflow_path} 2>/dev/null`.strip : ""
+logical_jobs = begin
+  require "yaml"
+  YAML.safe_load(`git -C #{repo_root} show #{expected_sha}:#{workflow_path} 2>/dev/null`).fetch("jobs").keys
+rescue StandardError
+  []
+end
+graph_parity = !logical_jobs.empty? && provider_workload_jobs.size == logical_jobs.size &&
+  (build.nil? || provider_workload_jobs.sort == logical_jobs.map { |key| "gha-#{key}" }.sort)
 
 # In-job phase boundaries come from the runner clock (epoch milliseconds).
 marks = Hash.new { |hash, key| hash[key] = {} }
@@ -82,6 +141,8 @@ issues << "provider run status #{run["status"].inspect} is not completed" unless
 issues << "provider run conclusion #{run["conclusion"].inspect} is not success" unless run["conclusion"] == "success"
 issues << "provider job conclusion #{job["conclusion"].inspect} is not success" unless job["conclusion"] == "success"
 issues << "runner envelope mismatch" unless runner["envelope_match"] == "true"
+issues << "runner target #{runner["target"].inspect} does not match #{controller_target}" unless runner["target"] == controller_target
+issues << "job graph parity failed (workflow jobs #{logical_jobs.inspect}, provider workload jobs #{provider_workload_jobs.inspect})" unless graph_parity
 issues << "source SHA mismatch" unless run["head_sha"] && run["head_sha"] == controller.dig("inputs", "expected_sha") && runner["checkout_sha"] == run["head_sha"]
 if probe
   marker_path = File.join(artifact_dir, "marker.txt")
@@ -96,12 +157,30 @@ else
   issues << "source tree dirty" if result && result["git_dirty"] != false
 end
 issues << "artifact checksums #{checksums}" unless checksums == "verified"
-issues << "run attempt is not 1" unless run["run_attempt"] == 1
+issues << "run attempt is not 1 or a job was retried" unless run["run_attempt"] == 1
+
+volumes_before = controller["provider_cache_volumes_before"]
+cold_qualification =
+  if probe || controller.dig("inputs", "cache_phase") != "cold"
+    "not applicable"
+  elsif cache["cache_expectation"] != "met"
+    "missing: dependency-cache miss not verified"
+  elsif controller_target == "github-actions"
+    "benchmark-cold: exact dependency-cache miss verified; provider-owned caches unknown"
+  elsif volumes_before.nil?
+    "missing: cluster cache volumes were not recorded before the build"
+  elsif (other = volumes_before.map { |v| v["name"] || v["id"] }.reject { |n| ghac_toolchain_volumes.include?(n) }).any?
+    "missing: cache volumes present before the build: #{other.join(", ")}"
+  else
+    toolchain = volumes_before.any? { |v| ghac_toolchain_volumes.include?(v["name"]) } ? "present" : "absent"
+    "benchmark-cold: exact dependency-cache miss verified; no container-cache or local-builder volumes before the build; GHAC toolchain volume #{toolchain}; other provider-owned caches unknown"
+  end
 
 record = {
   "record" => "ci-bench-pilot-provenance/v1",
   "scored" => false,
-  "target" => runner["target"] || "unknown",
+  "target" => controller_target,
+  "runner_target" => runner["target"] || "unknown",
   "repository" => run.dig("repository", "full_name"),
   "workflow_path" => run["path"],
   "source" => {
@@ -109,8 +188,18 @@ record = {
     "provider_head_sha" => run["head_sha"],
     "checkout_sha" => runner["checkout_sha"],
     "result_commit_sha" => result&.fetch("commit_sha", nil),
-    "result_git_dirty" => result&.fetch("git_dirty", nil)
+    "result_git_dirty" => result&.fetch("git_dirty", nil),
+    "workflow_blob" => workflow_blob.empty? ? "unknown" : workflow_blob
   },
+  "comparison_group" => "#{workflow_file}@#{workflow_blob.empty? ? "unknown" : workflow_blob[0, 12]}/#{manifest_profile}",
+  "graph" => {
+    "workflow_logical_jobs" => logical_jobs,
+    "provider_workload_jobs" => provider_workload_jobs,
+    "provider_orchestration_jobs" => provider_orchestration_jobs,
+    "parity" => graph_parity
+  },
+  "cold_qualification" => cold_qualification,
+  "provider_cache_volumes" => { "before" => volumes_before || "not recorded", "after" => controller["provider_cache_volumes_after"] || "not recorded" },
   "inputs" => controller["inputs"],
   "workload_class" => {
     "smoke" => "smoke/setup baseline (installs the full Ruby, Node, ImageMagick, and browser stack and starts services; not pure orchestration overhead)",

@@ -24,17 +24,21 @@ capture() {
   return 1
 }
 
-# Target identity. GitHub-hosted jobs report github-hosted; Buildkite GitHub
-# Actions compatibility jobs report self-hosted (see docs/plans/pilot-github-buildkite.md).
-case "${RUNNER_ENVIRONMENT:-}" in
-  github-hosted) target=github-actions ;;
-  self-hosted)
-    if [[ "${BUILDKITE:-}" == "true" || -n "${BUILDKITE_BUILD_ID:-}" ]]; then
-      target=buildkite-ghac
-    else
-      target=unknown
-    fi
+# Target identity comes from the dispatched runs-on label plus the runner
+# environment. GitHub-hosted jobs report github-hosted. Buildkite GitHub Actions
+# compatibility jobs report self-hosted, and their step environment is an
+# allowlist without BUILDKITE_* variables, so the agent binary identifies the
+# host. Runner providers report self-hosted under their own labels.
+label="${CI_BENCH_RUNNER:-ubuntu-24.04}"
+fact runner_label "$label"
+case "${RUNNER_ENVIRONMENT:-}:$label" in
+  github-hosted:ubuntu-24.04) target=github-actions ;;
+  self-hosted:ubuntu-24.04)
+    if command -v buildkite-agent >/dev/null 2>&1; then target=buildkite-ghac; else target=unknown; fi
     ;;
+  self-hosted:blacksmith-*) target=blacksmith ;;
+  self-hosted:depot-*) target=depot ;;
+  self-hosted:namespace-*|self-hosted:nscloud-*) target=namespace ;;
   *) target=unknown ;;
 esac
 [[ "$target" == unknown ]] && failures+=("target provider could not be identified")
@@ -98,8 +102,16 @@ fi
 if capture docker-version docker version; then
   fact docker_server_version "$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown)"
   fact docker_storage_driver "$(docker info --format '{{.Driver}}' 2>/dev/null || echo unknown)"
-  fact docker_endpoint "$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || echo unknown)"
-  fact docker_builder "$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/ { print $2; exit }' || echo unknown)"
+  docker_endpoint="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || echo unknown)"
+  docker_builder="$(docker buildx inspect 2>/dev/null | awk -F': *' '/^Driver:/ { print $2; exit }')"
+  fact docker_endpoint "$docker_endpoint"
+  fact docker_builder "${docker_builder:-unknown}"
+  fact buildx_builder_env "${BUILDX_BUILDER:-unset}"
+  # Builds must run on this host: a unix socket daemon and a docker or
+  # docker-container driver. Remote or unknown builders invalidate the sample.
+  if [[ "$docker_endpoint" != unix://* || ! "${docker_builder:-}" =~ ^(docker|docker-container)$ ]]; then
+    failures+=("Docker builder is not local (endpoint $docker_endpoint, driver ${docker_builder:-unknown})")
+  fi
   capture docker-info docker info
   capture docker-buildx docker buildx ls
   capture docker-images docker image ls --digests
