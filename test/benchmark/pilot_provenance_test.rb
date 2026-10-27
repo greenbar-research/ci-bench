@@ -101,9 +101,29 @@ class PilotProvenanceTest < Minitest::Test
     assert_includes rerun.fetch("invalid_reasons"), "run attempt is not 1 or a job was retried"
   end
 
+  def test_circleci_ghac_runs_the_github_actions_workflow_and_needs_its_own_identity
+    cache_env = "cache_hit=true\ncache_restore_evidence=sentinel_key_and_content_digest\ncache_digest=match\nprovider_cache_hit_output=false\ncache_expectation=met\n"
+    ghac = provenance(circle: { "ghac" => true }, cache_env: cache_env)
+    assert_equal [], ghac.fetch("invalid_reasons")
+    assert_equal "circleci-ghac", ghac.fetch("target")
+    assert_equal ".github/workflows/pilot.yml", ghac.dig("comparison_group", "workflow_path")
+    assert_equal "#{SHA}:.github/workflows/pilot.yml:smoke", ghac.dig("comparison_group", "key")
+    assert_equal ["pilot"], ghac.dig("graph", "workflow_logical_jobs")
+    assert_equal "false", ghac.dig("cache", "provider_cache_hit_output")
+    assert_match(/sentinel_key_and_content_digest/, ghac.dig("cache", "qualification"))
+    assert_includes ghac.dig("cache", "provider_owned_unknowns"), "CircleCI cache storage behind the intercepted actions/cache"
+
+    native_identity = provenance(circle: { "ghac" => true }, runner: { "target" => "circleci" })
+    assert_includes native_identity.fetch("invalid_reasons"), 'runner target "circleci" does not match circleci-ghac'
+
+    native = provenance(circle: {})
+    assert_equal ".circleci/config.yml", native.dig("comparison_group", "workflow_path")
+    assert_equal "circleci", native.fetch("target")
+  end
+
   private
 
-  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil, controller_extra: {}, circle: nil)
+  def provenance(run: {}, job: {}, runner: {}, probe: nil, observation: nil, buildkite: nil, volumes: nil, digest: nil, controller_extra: {}, circle: nil, cache_env: "cache_expectation=met\n")
     digest ||= YAML.safe_load(`git -C #{ROOT} show #{SHA}:benchmark/manifest.yml`).dig("profiles", "smoke", "expected_verification_digest")
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "artifact"))
@@ -112,7 +132,8 @@ class PilotProvenanceTest < Minitest::Test
       controller = controller.merge("profile" => "probe", "inputs" => { "expected_sha" => SHA }, "terminal_observation" => observation) if probe
       target = buildkite&.fetch("native", false) ? "buildkite-native" : "buildkite-ghac"
       controller = controller.merge("target" => target, "provider_cache_volumes_before" => volumes) if buildkite
-      controller = controller.merge("target" => "circleci") if circle
+      circle_target = circle&.fetch("ghac", false) ? "circleci-ghac" : "circleci"
+      controller = controller.merge("target" => circle_target) if circle
       controller = controller.merge("workflow" => "native-pilot.yml") if buildkite&.fetch("native", false)
       write_json(dir, "controller.json", controller.merge(controller_extra))
       if buildkite
@@ -138,9 +159,9 @@ class PilotProvenanceTest < Minitest::Test
       else
         write_json(dir, "artifact/result.json",
           { "status" => "passed", "git_dirty" => false, "verification" => { "digest" => digest }, "workloads" => [] })
-        File.write(File.join(dir, "artifact/cache.env"), "cache_expectation=met\n")
+        File.write(File.join(dir, "artifact/cache.env"), cache_env)
       end
-      runner_env = { "target" => buildkite ? target : (circle ? "circleci" : "github-actions"), "envelope_match" => "true", "checkout_sha" => SHA,
+      runner_env = { "target" => buildkite ? target : (circle ? circle_target : "github-actions"), "envelope_match" => "true", "checkout_sha" => SHA,
                      "docker_endpoint" => "unix:///var/run/docker.sock", "docker_builder" => "docker" }.merge(runner)
       File.write(File.join(dir, "artifact/runner.env"), runner_env.map { |k, v| "#{k}=#{v}\n" }.join)
       File.write(File.join(dir, "artifact-checksums.txt"), "verified\n")

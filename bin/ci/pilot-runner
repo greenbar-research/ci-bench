@@ -30,13 +30,19 @@ capture() {
 # allowlist without BUILDKITE_* variables, so the agent binary identifies the
 # host. Runner providers report self-hosted under their own labels. Native
 # Buildkite steps set CI_BENCH_RUNNER=buildkite-native and CircleCI jobs set
-# CI_BENCH_RUNNER=circleci; neither has GitHub runner env.
+# CI_BENCH_RUNNER=circleci; neither has GitHub runner env. CircleCI GitHub
+# Actions jobs run pilot.yml with runs-on ubuntu-24.04 (target circleci-ghac).
 label="${CI_BENCH_RUNNER:-ubuntu-24.04}"
 fact runner_label "$label"
 case "${RUNNER_ENVIRONMENT:-}:$label" in
   github-hosted:ubuntu-24.04) target=github-actions ;;
   self-hosted:ubuntu-24.04)
-    if command -v buildkite-agent >/dev/null 2>&1; then target=buildkite-ghac; else target=unknown; fi
+    # CircleCI's GitHub Actions workflow preview also reports self-hosted for
+    # ubuntu-24.04, and its GITHUB_RUN_ID is the CircleCI pipeline UUID rather
+    # than a number (CircleCI docs); both signals are recorded below.
+    if command -v buildkite-agent >/dev/null 2>&1; then target=buildkite-ghac
+    elif [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then target=circleci-ghac
+    else target=unknown; fi
     ;;
   self-hosted:blacksmith-*) target=blacksmith ;;
   *:depot-*)
@@ -56,6 +62,8 @@ case "${RUNNER_ENVIRONMENT:-}:$label" in
 esac
 [[ "$target" == unknown ]] && failures+=("target provider could not be identified")
 fact target "$target"
+fact github_run_id_format "$([[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]] && echo numeric || { [[ -n "${GITHUB_RUN_ID:-}" ]] && echo non-numeric || echo unset; })"
+fact circleci_env "${CIRCLECI:-unset}"
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   printf 'CI_BENCH_TARGET=%s\nBENCH_TARGET=%s\n' "$target" "$target" >> "$GITHUB_ENV"
 fi

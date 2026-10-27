@@ -2,6 +2,12 @@ name: Unscored provider pilot
 
 # One serial job per dispatch. The same file is the eventual Buildkite GitHub
 # Actions compatibility input; see docs/plans/pilot-github-buildkite.md.
+# CircleCI's GitHub Actions workflow preview runs this file unchanged
+# (target circleci-ghac). That runtime reports actions/cache cache-hit as
+# always false, so the benchmark-cache hit is decided by a key sentinel plus a
+# content digest written after a successful run; the provider output is only
+# recorded. This changed the cache contract, so samples from this revision on
+# form their own cohort.
 on:
   workflow_dispatch:
     inputs:
@@ -86,20 +92,44 @@ jobs:
 
       - name: Check cache expectation
         env:
-          CACHE_HIT: ${{ steps.deps-cache.outputs.cache-hit }}
+          PROVIDER_CACHE_HIT: ${{ steps.deps-cache.outputs.cache-hit }}
           CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
         run: |
           bin/ci/pilot-mark cache:end setup:start
+          # The hit is restored content proven by the sentinel the cold run wrote
+          # after succeeding: same key and the same content digest.
+          sentinel=vendor/bundle/.ci-bench-cache-key
+          restored=false digest=absent
+          if [[ -f "$sentinel" ]]; then
+            if [[ "$(cat "$sentinel")" == "$CACHE_KEY" && "$(bin/ci/pilot-cache-digest)" == "$(cat vendor/bundle/.ci-bench-cache-digest 2>/dev/null)" ]]; then
+              restored=true digest=match
+            else
+              digest=mismatch
+            fi
+          fi
           {
             echo "cache_key=${CACHE_KEY}"
-            echo "cache_hit=${CACHE_HIT:-false}"
+            echo "cache_hit=${restored}"
+            echo "cache_restore_evidence=sentinel_key_and_content_digest"
+            echo "cache_digest=${digest}"
+            echo "provider_cache_hit_output=${PROVIDER_CACHE_HIT:-unset}"
           } > tmp/pilot/cache.env
-          if [[ "$CI_BENCH_CACHE_PHASE" == cold && "$CACHE_HIT" == true ]]; then
+          if [[ "$digest" == mismatch ]]; then
+            echo "cache_expectation=violated: restored sentinel does not match key or content digest" >> tmp/pilot/cache.env
+            echo "restored cache content does not match its sentinel" >&2
+            exit 1
+          fi
+          if [[ "$PROVIDER_CACHE_HIT" == true && "$restored" != true ]]; then
+            echo "cache_expectation=violated: provider reported a hit without the sentinel" >> tmp/pilot/cache.env
+            echo "provider reported a cache hit but the sentinel is absent" >&2
+            exit 1
+          fi
+          if [[ "$CI_BENCH_CACHE_PHASE" == cold && "$restored" == true ]]; then
             echo "cache_expectation=violated: cold run restored an existing entry" >> tmp/pilot/cache.env
             echo "cold run restored an existing cache entry; use a new cache_epoch" >&2
             exit 1
           fi
-          if [[ "$CI_BENCH_CACHE_PHASE" == warm && "$CACHE_HIT" != true ]]; then
+          if [[ "$CI_BENCH_CACHE_PHASE" == warm && "$restored" != true ]]; then
             echo "cache_expectation=violated: warm run missed the cache" >> tmp/pilot/cache.env
             echo "warm run did not restore the cold run's cache entry" >&2
             exit 1
@@ -144,6 +174,16 @@ jobs:
       - name: Install dependencies
         run: |
           bin/ci/pilot-mark dependencies:start
+          # Setup actions can leave another version on PATH on non-GitHub
+          # runtimes; require the pinned toolchain and record what ran.
+          {
+            echo "ruby=$(ruby -e 'print RUBY_VERSION')"
+            echo "node=$(node --version)"
+            echo "ruby_path=$(command -v ruby)"
+            echo "node_path=$(command -v node)"
+          } > tmp/pilot/toolchain.env
+          grep -qx 'ruby=3.4.10' tmp/pilot/toolchain.env && grep -qx 'node=v24.18.0' tmp/pilot/toolchain.env \
+            || { cat tmp/pilot/toolchain.env >&2; echo "toolchain is not the pinned Ruby 3.4.10 / Node 24.18.0" >&2; exit 1; }
           bundle install --jobs 4
           npm ci
           npx playwright install --with-deps chromium
@@ -163,6 +203,15 @@ jobs:
           bin/bench doctor --profile "$CI_BENCH_PROFILE" 2>&1 | tee tmp/pilot/bench.log
           bin/bench run --profile "$CI_BENCH_PROFILE" --output tmp/pilot/result.json 2>&1 | tee -a tmp/pilot/bench.log
           bin/ci/pilot-mark workload:end
+
+      # Last step before the cache post-step saves the entry: only a successful
+      # run writes the key and content digest a warm run must find.
+      - name: Record benchmark-cache sentinel
+        env:
+          CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+        run: |
+          printf '%s' "$CACHE_KEY" > vendor/bundle/.ci-bench-cache-key
+          bin/ci/pilot-cache-digest > vendor/bundle/.ci-bench-cache-digest
 
       - name: Collect in-job evidence
         if: ${{ always() }}

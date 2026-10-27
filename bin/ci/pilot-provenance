@@ -48,8 +48,11 @@ workflow_file = controller["workflow"] || (probe ? "probe.yml" : "pilot.yml")
 # Native Buildkite samples run the pipeline files in .buildkite/ instead of a
 # GitHub Actions workflow; their step keys are the logical jobs.
 native = controller_target == "buildkite-native"
+# CircleCI GitHub Actions (circleci-ghac) runs the GitHub Actions workflow file
+# through CircleCI's pipeline API, so it has circleci.json but pilot.yml jobs.
+circle_ghac = circle && controller_target == "circleci-ghac"
 workflow_path = if native then ".buildkite/#{workflow_file}"
-                elsif circle then ".circleci/config.yml"
+                elsif circle && !circle_ghac then ".circleci/config.yml"
                 else ".github/workflows/#{workflow_file}"
                 end
 # Toolchain volume the GHAC runtime itself mounts on generated jobs; recorded
@@ -138,7 +141,7 @@ logical_jobs = begin
   require "yaml"
   definition = YAML.safe_load(`git -C #{repo_root} show #{expected_sha}:#{workflow_path} 2>/dev/null`)
   if native then definition.fetch("steps").map { |step| step.fetch("key") }
-  elsif circle
+  elsif circle && !circle_ghac
     # A workflow job entry is a name, or a one-key map when it has options such
     # as filters.
     definition.fetch("workflows").fetch(probe ? "probe" : "pilot").fetch("jobs").map { |job| job.is_a?(Hash) ? job.keys.first : job }
@@ -392,10 +395,13 @@ record = {
       "depot-ci" => ["Depot CI cache backend behind actions/cache", "Depot Cache auto-connect (cache.depot.dev)"],
       "blacksmith" => ["Blacksmith colocated actions cache behind actions/cache", "Blacksmith Bazel/Buck2 and Go build cache defaults"],
       "namespace" => ["Namespace cache service behind actions/cache", "Namespace runner image and Docker daemon state"],
-      "circleci" => ["CircleCI cache storage behind save_cache/restore_cache"]
+      "circleci" => ["CircleCI cache storage behind save_cache/restore_cache"],
+      "circleci-ghac" => ["CircleCI cache storage behind the intercepted actions/cache", "CircleCI GitHub Actions runtime image, tool paths and public-action download cache"]
     }.fetch(controller_target, []),
-    "qualification" => "benchmark-cold only: explicit dependency cache keyed by cache_epoch; provider-owned caches cannot be flushed"
+    "qualification" => "benchmark-cold only: explicit dependency cache keyed by cache_epoch; provider-owned caches cannot be flushed" +
+      (cache["cache_restore_evidence"] ? "; hit decided by #{cache["cache_restore_evidence"]} (provider cache-hit output recorded as provider_cache_hit_output, not used)" : "")
   ),
+  "toolchain" => read_env(File.join(artifact_dir, "toolchain.env")),
   "result" => result && {
     "status" => result["status"],
     "error" => result["error"],

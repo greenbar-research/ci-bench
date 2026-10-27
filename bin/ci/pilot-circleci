@@ -11,12 +11,25 @@
 # pipeline, workflow, job details, artifacts, and sanitized step logs. The
 # API token is read from CIRCLECI_TOKEN and passed to curl on stdin, never on
 # the command line. Evidence stays under tmp/pilot-evidence/cc-<number>.
+#
+# CI_BENCH_CIRCLECI_TARGET selects the target: circleci (default; the native
+# .circleci/config.yml definition) or circleci-ghac (CircleCI's GitHub Actions
+# workflow preview running .github/workflows/pilot.yml unchanged, through the
+# pipeline definition in CI_BENCH_CIRCLECI_GHAC_DEFINITION). circleci-ghac has
+# no probe workflow; a smoke-profile run is its probe. Its workflow_dispatch
+# inputs are sent as pipeline parameters; whether CircleCI maps them to
+# inputs.* is verified from the run's own evidence, not assumed.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 repo="${CI_BENCH_REPO:-greenbar-research/ci-bench}"
 slug="gh/$repo"
-definition="${CI_BENCH_CIRCLECI_DEFINITION:-c6f5dfba-472d-5811-925b-ca433553bc2f}"
+target="${CI_BENCH_CIRCLECI_TARGET:-circleci}"
+case "$target" in
+  circleci) definition="${CI_BENCH_CIRCLECI_DEFINITION:-c6f5dfba-472d-5811-925b-ca433553bc2f}" ;;
+  circleci-ghac) definition="${CI_BENCH_CIRCLECI_GHAC_DEFINITION:-}" ;;
+  *) echo "CI_BENCH_CIRCLECI_TARGET must be circleci or circleci-ghac" >&2; exit 2 ;;
+esac
 api="${CI_BENCH_CIRCLECI_API:-https://circleci.com/api/v2}"
 api_v1="${api%/v2}/v1.1"
 iso_now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
@@ -234,8 +247,14 @@ run() {
   local call_started_at revision
   call_started_at="$(iso_now)"
   revision="$(controller_revision)"
+  [[ -n "$definition" ]] || { echo "$target has no pipeline definition (set CI_BENCH_CIRCLECI_GHAC_DEFINITION); nothing dispatched" >&2; exit 2; }
+  [[ "$target" == circleci-ghac && "$profile" == probe ]] && { echo "circleci-ghac has no probe workflow; run the smoke profile instead" >&2; exit 2; }
+  # Ambiguous-create reconciliation assumes one CircleCI controller at a time on
+  # this host, across both definitions; a second one waits here before creating.
+  exec {controller_lock}>>"${TMPDIR:-/tmp}/ci-bench-circleci-controller.lock"
+  flock "$controller_lock"
   verify_pilot_tag "$sha"
-  local mode=pilot params
+  local mode=pilot params workflow
   if [[ "$profile" == probe ]]; then
     mode=probe
     params="$(jq -n --arg sha "$sha" '{mode: "probe", expected_sha: $sha}')"
@@ -244,6 +263,13 @@ run() {
       || { echo "pilot runs need PROFILE (smoke|full) CACHE_PHASE (cold|warm) CACHE_EPOCH" >&2; exit 2; }
     params="$(jq -n --arg sha "$sha" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
       '{mode: "pilot", expected_sha: $sha, profile: $profile, cache_phase: $phase, cache_epoch: $epoch}')"
+  fi
+  workflow="$mode"
+  if [[ "$target" == circleci-ghac ]]; then
+    # pilot.yml's workflow_dispatch inputs; runs-on must be ubuntu-24.04 there.
+    params="$(jq -n --arg sha "$sha" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
+      '{profile: $profile, cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha, runner: "ubuntu-24.04"}')"
+    workflow=pilot.yml
   fi
   local scratch body requested_at response accepted_at id number dir acceptance="create response"
   scratch="$(mktemp -d)"
@@ -263,12 +289,15 @@ run() {
   jq -n --arg call_started_at "$call_started_at" --arg first_send_at "$(cat "$scratch/first_send_at")" \
     --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg acceptance "$acceptance" \
     --arg profile "$profile" --arg mode "$mode" --arg sha "$sha" --arg phase "$phase" --arg epoch "$epoch" \
-    --argjson revision "$revision" --argjson response "$response" \
+    --argjson revision "$revision" --argjson response "$response" --arg target "$target" --arg workflow "$workflow" \
+    --arg definition "$definition" --argjson params "$params" \
     '{controller_clock: "orb UTC", controller_revision: $revision, poll_interval_ms: 5000,
-      dispatch_ref: ("pilot/" + $sha), target: "circleci", workflow: $mode, profile: $profile,
+      dispatch_ref: ("pilot/" + $sha), target: $target, workflow: $workflow, profile: $profile,
+      pipeline_definition_id: $definition, pipeline_parameters: $params,
       controller_call_started_at: $call_started_at, trigger_requested_at: $requested_at,
       trigger_first_http_send_at: $first_send_at, trigger_accepted_at: $accepted_at, trigger_acceptance: $acceptance,
-      inputs: ({expected_sha: $sha, runner: "circleci"} + (if $mode == "pilot" then {profile: $profile, cache_phase: $phase, cache_epoch: $epoch} else {} end)),
+      inputs: ({expected_sha: $sha, runner: (if $target == "circleci-ghac" then "ubuntu-24.04" else "circleci" end)}
+               + (if $mode == "pilot" then {profile: $profile, cache_phase: $phase, cache_epoch: $epoch} else {} end)),
       dispatch_response: $response}' > "$dir/controller.json"
   echo "$number https://app.circleci.com/pipelines/github/$repo/$number"
 
@@ -315,7 +344,7 @@ collect() {
 
   # Step logs come from API v1.1; output URLs are presigned, so cc sends them
   # no token.
-  rm -rf "$dir/artifact"
+  rm -rf "$dir/artifact" "$dir/artifact-raw"
   mkdir -p "$dir/artifact"
   local workload_number
   workload_number="$(jq -r '.[0].number // empty' <<<"$details")"
@@ -326,11 +355,28 @@ collect() {
         { cc "$url" | jq -r '.[]?.message // empty' | sanitize > "$dir/logs/step-$index.txt"; } || true
       done
     cc "$api/project/$slug/$workload_number/artifacts" "$dir/artifacts.json"
-    jq -r '.items[] | select(.path | startswith("pilot/")) | "\(.url)\t\(.path)"' "$dir/artifacts.json" |
-      while IFS=$'\t' read -r url path; do
-        mkdir -p "$dir/artifact/$(dirname "${path#pilot/}")"
-        cc "$url" "$dir/artifact/${path#pilot/}"
-      done
+    if [[ "$(jq -r '.target // "circleci"' "$dir/controller.json" 2>/dev/null)" == circleci-ghac ]]; then
+      # CircleCI intercepts actions/upload-artifact; its stored path layout is
+      # recorded in artifacts.json. Everything is downloaded to artifact-raw/,
+      # and the one directory holding runner.env becomes artifact/.
+      jq -r '.items[] | "\(.url)\t\(.path)"' "$dir/artifacts.json" |
+        while IFS=$'\t' read -r url path; do
+          [[ "$path" != *..* ]] || continue
+          mkdir -p "$dir/artifact-raw/$(dirname "$path")"
+          cc "$url" "$dir/artifact-raw/$path"
+        done
+      local found
+      found="$(find "$dir/artifact-raw" -name runner.env -type f 2>/dev/null)"
+      if [[ -n "$found" && "$(wc -l <<<"$found")" == 1 ]]; then
+        cp -a "$(dirname "$found")/." "$dir/artifact/"
+      fi
+    else
+      jq -r '.items[] | select(.path | startswith("pilot/")) | "\(.url)\t\(.path)"' "$dir/artifacts.json" |
+        while IFS=$'\t' read -r url path; do
+          mkdir -p "$dir/artifact/$(dirname "${path#pilot/}")"
+          cc "$url" "$dir/artifact/${path#pilot/}"
+        done
+    fi
   fi
   if [[ -f "$dir/artifact/SHA256SUMS" ]]; then
     (cd "$dir/artifact" && sha256sum --check --quiet SHA256SUMS) \

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Prints the SHA-256 over the benchmark cache's file paths and contents (the
+# actions/cache paths in .github/workflows/pilot.yml), excluding the sentinel
+# files themselves. Paths under $HOME are written as ~/ so the digest does not
+# depend on the home directory. A missing cache path contributes nothing; the
+# path list is part of the digest. Run from the checkout root.
+set -euo pipefail
+paths=()
+for p in vendor/bundle "$HOME/.npm" "$HOME/.cache/ms-playwright"; do
+  [[ -d "$p" ]] && paths+=("$p")
+done
+{
+  printf 'paths=%s\n' "${paths[*]//$HOME\//\~/}"
+  if (( ${#paths[@]} )); then
+    find "${paths[@]}" -type f ! -path vendor/bundle/.ci-bench-cache-key ! -path vendor/bundle/.ci-bench-cache-digest -print0 |
+      sort -z | xargs -0 -r sha256sum | sed "s|  $HOME/|  ~/|"
+  fi
+} | sha256sum | cut -c1-64
