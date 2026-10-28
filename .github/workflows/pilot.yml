@@ -49,7 +49,7 @@ concurrency:
 jobs:
   pilot:
     name: Pilot ${{ inputs.profile }} ${{ inputs.cache_phase }}
-    runs-on: ${{ inputs.runner }}
+    runs-on: ubuntu-24.04 # circleci-ghac adapter: CircleCI rejects runs-on expressions (pipeline 10)
     timeout-minutes: 50
     env:
       CI_BENCH_EXPECTED_SHA: ${{ inputs.expected_sha }}
