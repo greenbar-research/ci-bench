@@ -22,7 +22,7 @@ on:
       cache_phase:
         description: cold requires a cache miss; warm requires an exact hit from a successful cold run
         required: false
-        default: UNSET # circleci-ghac adapter: per-run default
+        default: warm # circleci-ghac adapter: per-run default
         type: choice
         options:
           - cold
@@ -30,7 +30,7 @@ on:
       cache_epoch:
         description: Benchmark cache epoch; use a new value for each cold run
         required: false
-        default: UNSET # circleci-ghac adapter: per-run default
+        default: r59040c4-mon1116-circleci-ghac-a # circleci-ghac adapter: per-run default
         type: string
       expected_sha:
         description: Full commit SHA the dispatched ref must resolve to (unused by the circleci-ghac adapter, which uses github.sha)
@@ -46,21 +46,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-bench-pilot-${{ inputs.runner }}
+  group: ci-bench-pilot-ubuntu-24.04
   cancel-in-progress: false
 
 jobs:
   pilot:
-    name: Pilot ${{ inputs.profile }} ${{ inputs.cache_phase }}
+    name: Pilot full warm
     runs-on: ubuntu-24.04 # circleci-ghac adapter: CircleCI rejects runs-on expressions (pipeline 10)
     timeout-minutes: 50
     env:
       # circleci-ghac adapter: the commit cannot name itself; the controller checks the provider commit separately.
       CI_BENCH_EXPECTED_SHA: ${{ github.sha }}
-      CI_BENCH_RUNNER: ${{ inputs.runner }}
-      CI_BENCH_PROFILE: ${{ inputs.profile }}
-      CI_BENCH_CACHE_PHASE: ${{ inputs.cache_phase }}
-      CI_BENCH_CACHE_EPOCH: ${{ inputs.cache_epoch }}
+      CI_BENCH_RUNNER: ubuntu-24.04
+      CI_BENCH_PROFILE: full
+      CI_BENCH_CACHE_PHASE: warm
+      CI_BENCH_CACHE_EPOCH: r59040c4-mon1116-circleci-ghac-a
       # Keep Docker builds on the job host on every target (see the pilot plan).
       BUILDX_BUILDER: default
       BUNDLE_PATH: vendor/bundle
@@ -88,7 +88,7 @@ jobs:
         id: deps-cache
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          key: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+          key: ci-bench-pilot-r59040c4-mon1116-circleci-ghac-a-full-ubuntu-24.04-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
           path: |
             vendor/bundle
             ~/.npm
@@ -97,7 +97,7 @@ jobs:
       - name: Check cache expectation
         env:
           PROVIDER_CACHE_HIT: ${{ steps.deps-cache.outputs.cache-hit }}
-          CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+          CACHE_KEY: ci-bench-pilot-r59040c4-mon1116-circleci-ghac-a-full-ubuntu-24.04-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
         run: |
           bin/ci/pilot-mark cache:end setup:start
           # The hit is restored content proven by the sentinel the cold run wrote
@@ -219,7 +219,7 @@ jobs:
       # run writes the key and content digest a warm run must find.
       - name: Record benchmark-cache sentinel
         env:
-          CACHE_KEY: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
+          CACHE_KEY: ci-bench-pilot-r59040c4-mon1116-circleci-ghac-a-full-ubuntu-24.04-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
         run: |
           printf '%s' "$CACHE_KEY" > vendor/bundle/.ci-bench-cache-key
           bin/ci/pilot-cache-digest > vendor/bundle/.ci-bench-cache-digest
@@ -238,7 +238,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pilot-${{ inputs.profile }}-${{ inputs.cache_phase }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pilot-full-warm-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 30
           path: tmp/pilot/
