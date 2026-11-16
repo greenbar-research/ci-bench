@@ -140,6 +140,13 @@ jobs:
           fi
           echo "cache_expectation=met" >> tmp/pilot/cache.env
 
+      # circleci-ghac adapter: CircleCI's runner user cannot create the tool cache that
+      # ruby/setup-ruby's prebuilt Rubies require (pipeline 15: EACCES mkdir /opt/hostedtoolcache).
+      # A no-op where the directory is already writable.
+      - name: Prepare tool cache
+        run: |
+          [[ -w /opt/hostedtoolcache ]] || { sudo mkdir -p /opt/hostedtoolcache && sudo chown "$(id -u):$(id -g)" /opt/hostedtoolcache; }
+
       - name: Set up Ruby
         uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
         with:

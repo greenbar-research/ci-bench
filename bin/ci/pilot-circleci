@@ -18,8 +18,9 @@
 # workflow preview running .github/workflows/pilot.yml unchanged, through the
 # pipeline definition in CI_BENCH_CIRCLECI_GHAC_DEFINITION). circleci-ghac has
 # no probe workflow; a smoke-profile run is its probe. CircleCI rejects API
-# parameters there, so each run's inputs are the declared defaults of the
-# dispatched commit (checked before dispatch and against the job's cache key).
+# parameters there and leaves inputs.* empty, so each run dispatches a commit
+# whose inputs are literals and declared defaults (checked before dispatch and
+# against the job's cache key).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -288,6 +289,11 @@ run() {
     [[ -n "$declared" ]] && jq -e --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
       '.profile == $profile and .cache_phase == $phase and .cache_epoch == $epoch and .runner == "ubuntu-24.04"' <<<"$declared" >/dev/null \
       || { echo "pilot/$sha does not declare input defaults profile=$profile cache_phase=$phase cache_epoch=$epoch runner=ubuntu-24.04; nothing dispatched" >&2; exit 2; }
+    # CircleCI leaves inputs.* empty on API runs even with defaults (pipeline 15), so a run
+    # commit must carry its inputs as literals: no inputs.* expression may remain.
+    if git show "$sha:.github/workflows/pilot.yml" | grep -q '\${{ *inputs\.'; then
+      echo "pilot.yml at $sha still reads inputs.*, which CircleCI leaves empty; nothing dispatched" >&2; exit 2
+    fi
     params='{}'
     workflow=pilot.yml
   fi
