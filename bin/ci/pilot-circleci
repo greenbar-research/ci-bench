@@ -6,7 +6,8 @@
 #   bin/ci/pilot-circleci collect PIPELINE_ID [EVIDENCE_DIR]
 #
 # A pipeline is created through POST /pipeline/run with config and checkout
-# both pinned to the immutable tag pilot/EXPECTED_SHA. The controller records
+# both pinned to the immutable tag pilot/EXPECTED_SHA (circleci-ghac: the branch
+# pilot-run/EXPECTED_SHA, verified to name it). The controller records
 # controller-clock times, polls to its terminal observation, then collects the
 # pipeline, workflow, job details, artifacts, and sanitized step logs. The
 # API token is read from CIRCLECI_TOKEN and passed to curl on stdin, never on
@@ -63,12 +64,18 @@ controller_revision() {
     '{sha: $sha, bin_ci_dirty: $dirty}'
 }
 
+# circleci-ghac dispatches the branch pilot-run/SHA: CircleCI's GitHub Actions
+# wrapper config has no tag filters, so a tag pipeline compiles to no workflow
+# (pipeline 14). Native CircleCI keeps the tag. Either ref must name exactly SHA.
+dispatch_ref_kind() { [[ "$target" == circleci-ghac ]] && echo branch || echo tag; }
+dispatch_ref_name() { [[ "$target" == circleci-ghac ]] && echo "pilot-run/$1" || echo "pilot/$1"; }
 verify_pilot_tag() {
-  local sha="$1" object
+  local sha="$1" object kind
+  kind="$(dispatch_ref_kind)"
   throttle github 800
-  object="$(gh api "repos/$repo/git/ref/tags/pilot/$sha" --jq '"\(.object.type) \(.object.sha)"' 2>/dev/null || true)"
+  object="$(gh api "repos/$repo/git/ref/$([[ $kind == branch ]] && echo heads || echo tags)/$(dispatch_ref_name "$sha")" --jq '"\(.object.type) \(.object.sha)"' 2>/dev/null || true)"
   if [[ "$object" != "commit $sha" ]]; then
-    echo "tag pilot/$sha does not name commit $sha; refusing" >&2
+    echo "$kind $(dispatch_ref_name "$sha") does not name commit $sha; refusing" >&2
     exit 1
   fi
 }
@@ -187,16 +194,16 @@ cc_create() {
   # Timestamps are parsed to epoch seconds, not compared as strings. The
   # window starts 60 s before the orb-clock request to allow for clock skew;
   # the match must also carry the measured SHA and be unique.
-  match="$(jq -c --arg tag "pilot/$sha" --arg sha "$sha" --arg since "$requested_at" --slurpfile seen "$state/baseline_ids.json" '
+  match="$(jq -c --arg ref "$(dispatch_ref_name "$sha")" --arg sha "$sha" --arg since "$requested_at" --slurpfile seen "$state/baseline_ids.json" '
     def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
     ($since | epoch) as $start
     # GitHub App pipelines carry the ref and commit in trigger_parameters.github_app, not vcs.
-    | [.items[] | select(((.vcs.tag // .trigger_parameters.github_app.tag) == $tag)
+    | [.items[] | select((((.vcs.tag // .trigger_parameters.github_app.tag) == $ref) or ((.vcs.branch // .trigger_parameters.github_app.branch) == $ref))
                          and ((.vcs.revision // .trigger_parameters.github_app.commit_sha) == $sha) and ((.created_at | epoch) >= $start - 60)
                          and (.id as $id | $seen[0] | index($id) | not))]
     | if length == 1 then .[0] else empty end' <<<"$pipelines")"
   if [[ -z "$match" ]]; then
-    echo "no unique new pipeline on pilot/$sha at $sha since $requested_at (60 s skew window, baseline excluded); acceptance unknown; not posting again" >&2
+    echo "no unique new pipeline on $(dispatch_ref_name "$sha") at $sha since $requested_at (60 s skew window, baseline excluded); acceptance unknown; not posting again" >&2
     return 1
   fi
   echo "$code" > "$state/reconciled"
@@ -287,8 +294,8 @@ run() {
   local scratch body requested_at response accepted_at id number dir acceptance="create response"
   scratch="$(mktemp -d)"
   body="$scratch/body.json"
-  jq -n --arg definition "$definition" --arg tag "pilot/$sha" --argjson params "$params" \
-    '{definition_id: $definition, config: {tag: $tag}, checkout: {tag: $tag}} + (if $params == {} then {} else {parameters: $params} end)' > "$body"
+  jq -n --arg definition "$definition" --arg kind "$(dispatch_ref_kind)" --arg ref "$(dispatch_ref_name "$sha")" --argjson params "$params" \
+    '{definition_id: $definition, config: {($kind): $ref}, checkout: {($kind): $ref}} + (if $params == {} then {} else {parameters: $params} end)' > "$body"
   take_baseline "$scratch"
   # requested_at precedes the limiter wait; first_send_at follows it.
   requested_at="$(iso_now)"
@@ -303,9 +310,9 @@ run() {
     --arg requested_at "$requested_at" --arg accepted_at "$accepted_at" --arg acceptance "$acceptance" \
     --arg profile "$profile" --arg mode "$mode" --arg sha "$sha" --arg phase "$phase" --arg epoch "$epoch" \
     --argjson revision "$revision" --argjson response "$response" --arg target "$target" --arg workflow "$workflow" \
-    --arg definition "$definition" --argjson params "$params" \
+    --arg definition "$definition" --arg dispatch_ref "$(dispatch_ref_name "$sha")" --argjson params "$params" \
     '{controller_clock: "orb UTC", controller_revision: $revision, poll_interval_ms: 5000,
-      dispatch_ref: ("pilot/" + $sha), target: $target, workflow: $workflow, profile: $profile,
+      dispatch_ref: $dispatch_ref, target: $target, workflow: $workflow, profile: $profile,
       pipeline_definition_id: $definition, pipeline_parameters: $params,
       controller_call_started_at: $call_started_at, trigger_requested_at: $requested_at,
       trigger_first_http_send_at: $first_send_at, trigger_accepted_at: $accepted_at, trigger_acceptance: $acceptance,
