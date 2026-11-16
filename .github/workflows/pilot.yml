@@ -22,7 +22,7 @@ on:
       cache_phase:
         description: cold requires a cache miss; warm requires an exact hit from a successful cold run
         required: false
-        default: UNSET # circleci-ghac adapter: per-run default
+        default: cold # circleci-ghac adapter: per-run default
         type: choice
         options:
           - cold
@@ -30,7 +30,7 @@ on:
       cache_epoch:
         description: Benchmark cache epoch; use a new value for each cold run
         required: false
-        default: UNSET # circleci-ghac adapter: per-run default
+        default: r4aa7e47-mon1116-circleci-ghac-a # circleci-ghac adapter: per-run default
         type: string
       expected_sha:
         description: Full commit SHA the dispatched ref must resolve to (unused by the circleci-ghac adapter, which uses github.sha)
