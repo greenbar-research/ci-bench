@@ -65,6 +65,11 @@ jobs:
       BUILDX_BUILDER: default
       BUNDLE_PATH: vendor/bundle
       BUNDLE_DEPLOYMENT: "true"
+      # circleci-ghac adapter: CircleCI's machine image puts rbenv shims ahead of the Ruby
+      # ruby/setup-ruby adds to PATH (pipeline 16: rbenv "ruby-3.4.10 is not installed").
+      # "system" makes the shims run the first Ruby on PATH; the toolchain check still
+      # requires exactly 3.4.10.
+      RBENV_VERSION: system
 
     steps:
       - name: Mark job start
