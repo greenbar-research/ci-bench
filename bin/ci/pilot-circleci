@@ -16,9 +16,9 @@
 # .circleci/config.yml definition) or circleci-ghac (CircleCI's GitHub Actions
 # workflow preview running .github/workflows/pilot.yml unchanged, through the
 # pipeline definition in CI_BENCH_CIRCLECI_GHAC_DEFINITION). circleci-ghac has
-# no probe workflow; a smoke-profile run is its probe. Its workflow_dispatch
-# inputs are sent as pipeline parameters; whether CircleCI maps them to
-# inputs.* is verified from the run's own evidence, not assumed.
+# no probe workflow; a smoke-profile run is its probe. CircleCI rejects API
+# parameters there, so each run's inputs are the declared defaults of the
+# dispatched commit (checked before dispatch and against the job's cache key).
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -190,7 +190,9 @@ cc_create() {
   match="$(jq -c --arg tag "pilot/$sha" --arg sha "$sha" --arg since "$requested_at" --slurpfile seen "$state/baseline_ids.json" '
     def epoch: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
     ($since | epoch) as $start
-    | [.items[] | select(.vcs.tag == $tag and .vcs.revision == $sha and ((.created_at | epoch) >= $start - 60)
+    # GitHub App pipelines carry the ref and commit in trigger_parameters.github_app, not vcs.
+    | [.items[] | select(((.vcs.tag // .trigger_parameters.github_app.tag) == $tag)
+                         and ((.vcs.revision // .trigger_parameters.github_app.commit_sha) == $sha) and ((.created_at | epoch) >= $start - 60)
                          and (.id as $id | $seen[0] | index($id) | not))]
     | if length == 1 then .[0] else empty end' <<<"$pipelines")"
   if [[ -z "$match" ]]; then
@@ -266,16 +268,27 @@ run() {
   fi
   workflow="$mode"
   if [[ "$target" == circleci-ghac ]]; then
-    # pilot.yml's workflow_dispatch inputs; runs-on must be ubuntu-24.04 there.
-    params="$(jq -n --arg sha "$sha" --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
-      '{profile: $profile, cache_phase: $phase, cache_epoch: $epoch, expected_sha: $sha, runner: "ubuntu-24.04"}')"
+    # CircleCI rejects API pipeline parameters for a GitHub Actions definition
+    # (pipeline 11: "Unexpected argument(s)") and fills inputs.* from the
+    # declared input defaults. Each run therefore dispatches a commit whose
+    # pilot.yml defaults are that run's inputs, and sends no parameters. Refuse
+    # to dispatch unless the tagged file declares exactly the requested values;
+    # provenance then checks the job's cache key carries them.
+    local declared
+    declared="$(git show "$sha:.github/workflows/pilot.yml" | ruby -ryaml -rjson -e '
+      i = YAML.safe_load($stdin.read).dig(true, "workflow_dispatch", "inputs") || {}
+      puts JSON.generate(i.transform_values { |v| v["default"] })' 2>/dev/null || true)"
+    [[ -n "$declared" ]] && jq -e --arg profile "$profile" --arg phase "$phase" --arg epoch "$epoch" \
+      '.profile == $profile and .cache_phase == $phase and .cache_epoch == $epoch and .runner == "ubuntu-24.04"' <<<"$declared" >/dev/null \
+      || { echo "pilot/$sha does not declare input defaults profile=$profile cache_phase=$phase cache_epoch=$epoch runner=ubuntu-24.04; nothing dispatched" >&2; exit 2; }
+    params='{}'
     workflow=pilot.yml
   fi
   local scratch body requested_at response accepted_at id number dir acceptance="create response"
   scratch="$(mktemp -d)"
   body="$scratch/body.json"
   jq -n --arg definition "$definition" --arg tag "pilot/$sha" --argjson params "$params" \
-    '{definition_id: $definition, config: {tag: $tag}, checkout: {tag: $tag}, parameters: $params}' > "$body"
+    '{definition_id: $definition, config: {tag: $tag}, checkout: {tag: $tag}} + (if $params == {} then {} else {parameters: $params} end)' > "$body"
   take_baseline "$scratch"
   # requested_at precedes the limiter wait; first_send_at follows it.
   requested_at="$(iso_now)"

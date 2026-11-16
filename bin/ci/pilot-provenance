@@ -104,7 +104,8 @@ elsif circle
     "id" => pipeline["number"],
     "status" => terminal ? "completed" : workflow["status"],
     "conclusion" => workflow["status"],
-    "head_sha" => pipeline.dig("vcs", "revision"),
+    # GitHub App pipelines leave vcs empty and carry the commit here.
+    "head_sha" => pipeline.dig("vcs", "revision") || pipeline.dig("trigger_parameters", "github_app", "commit_sha"),
     # A rerun adds a workflow to the pipeline; a retried job adds a job.
     "run_attempt" => circle_jobs.size == 1 && (circle["workflows"] || [workflow]).size == 1 ? 1 : "retried",
     "created_at" => pipeline["created_at"],
@@ -211,6 +212,12 @@ else
   issues << "expected verification digest unavailable from the measured commit's manifest" unless expected_digest
   issues << "verification digest mismatch" if result && expected_digest && result.dig("verification", "digest") != expected_digest
   issues << "source tree dirty" if result && result["git_dirty"] != false
+end
+if circle_ghac && !probe
+  # Inputs reach the job only as declared defaults; the cache key the job built
+  # from inputs.* must carry the controller's requested values.
+  prefix = "ci-bench-pilot-#{controller.dig("inputs", "cache_epoch")}-#{manifest_profile}-ubuntu-24.04-"
+  issues << "job inputs do not match the requested inputs (cache key #{cache["cache_key"].inspect})" unless cache["cache_key"].to_s.start_with?(prefix)
 end
 issues << "artifact checksums #{checksums}" unless checksums == "verified"
 issues << "run attempt is not 1 or a job was retried" unless run["run_attempt"] == 1

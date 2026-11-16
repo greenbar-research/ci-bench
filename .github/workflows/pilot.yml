@@ -13,25 +13,28 @@ on:
     inputs:
       profile:
         description: smoke (smoke/setup baseline) or full (serial Rails workload)
-        required: true
+        required: false
+        default: full # circleci-ghac adapter: per-run default
         type: choice
         options:
           - smoke
           - full
       cache_phase:
         description: cold requires a cache miss; warm requires an exact hit from a successful cold run
-        required: true
+        required: false
+        default: UNSET # circleci-ghac adapter: per-run default
         type: choice
         options:
           - cold
           - warm
       cache_epoch:
         description: Benchmark cache epoch; use a new value for each cold run
-        required: true
+        required: false
+        default: UNSET # circleci-ghac adapter: per-run default
         type: string
       expected_sha:
-        description: Full commit SHA the dispatched ref must resolve to
-        required: true
+        description: Full commit SHA the dispatched ref must resolve to (unused by the circleci-ghac adapter, which uses github.sha)
+        required: false
         type: string
       runner:
         description: runs-on label; ubuntu-24.04 for GitHub-hosted and Buildkite GHAC, or a provider's 4 vCPU / 16 GB Ubuntu 24.04 label
@@ -52,7 +55,8 @@ jobs:
     runs-on: ubuntu-24.04 # circleci-ghac adapter: CircleCI rejects runs-on expressions (pipeline 10)
     timeout-minutes: 50
     env:
-      CI_BENCH_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      # circleci-ghac adapter: the commit cannot name itself; the controller checks the provider commit separately.
+      CI_BENCH_EXPECTED_SHA: ${{ github.sha }}
       CI_BENCH_RUNNER: ${{ inputs.runner }}
       CI_BENCH_PROFILE: ${{ inputs.profile }}
       CI_BENCH_CACHE_PHASE: ${{ inputs.cache_phase }}

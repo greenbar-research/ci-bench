@@ -102,8 +102,9 @@ class PilotProvenanceTest < Minitest::Test
   end
 
   def test_circleci_ghac_runs_the_github_actions_workflow_and_needs_its_own_identity
-    cache_env = "cache_hit=true\ncache_restore_evidence=sentinel_key_and_content_digest\ncache_digest=match\nprovider_cache_hit_output=false\ncache_expectation=met\n"
-    ghac = provenance(circle: { "ghac" => true }, cache_env: cache_env)
+    cache_env = "cache_key=ci-bench-pilot-e1-smoke-ubuntu-24.04-Linux-abc\ncache_hit=true\ncache_restore_evidence=sentinel_key_and_content_digest\ncache_digest=match\nprovider_cache_hit_output=false\ncache_expectation=met\n"
+    inputs = { "inputs" => { "profile" => "smoke", "cache_phase" => "warm", "cache_epoch" => "e1", "expected_sha" => SHA } }
+    ghac = provenance(circle: { "ghac" => true, "github_app" => true }, cache_env: cache_env, controller_extra: inputs)
     assert_equal [], ghac.fetch("invalid_reasons")
     assert_equal "circleci-ghac", ghac.fetch("target")
     assert_equal ".github/workflows/pilot.yml", ghac.dig("comparison_group", "workflow_path")
@@ -112,6 +113,10 @@ class PilotProvenanceTest < Minitest::Test
     assert_equal "false", ghac.dig("cache", "provider_cache_hit_output")
     assert_match(/sentinel_key_and_content_digest/, ghac.dig("cache", "qualification"))
     assert_includes ghac.dig("cache", "provider_owned_unknowns"), "CircleCI cache storage behind the intercepted actions/cache"
+
+    # The adapter's inputs are declared defaults; a job whose cache key carries another epoch ran other inputs.
+    other_epoch = provenance(circle: { "ghac" => true, "github_app" => true }, cache_env: cache_env.sub("-e1-", "-e2-"), controller_extra: inputs)
+    assert_equal ['job inputs do not match the requested inputs (cache key "ci-bench-pilot-e2-smoke-ubuntu-24.04-Linux-abc")'], other_epoch.fetch("invalid_reasons")
 
     native_identity = provenance(circle: { "ghac" => true }, runner: { "target" => "circleci" })
     assert_includes native_identity.fetch("invalid_reasons"), 'runner target "circleci" does not match circleci-ghac'
@@ -147,7 +152,9 @@ class PilotProvenanceTest < Minitest::Test
         job = { "name" => "pilot", "status" => "success", "number" => 7, "queued_at" => "2026-10-20T00:00:04Z",
                 "started_at" => "2026-10-20T00:00:05Z", "stopped_at" => "2026-10-20T00:00:35Z",
                 "executor" => { "type" => "machine", "resource_class" => "large.gen2" } }
-        write_json(dir, "circleci.json", { "pipeline" => { "number" => 3, "created_at" => "2026-10-20T00:00:02Z", "vcs" => { "revision" => SHA } },
+        # GitHub App pipelines leave vcs empty and carry the commit in trigger_parameters.github_app.
+        pipeline_source = circle["github_app"] ? { "vcs" => {}, "trigger_parameters" => { "github_app" => { "commit_sha" => SHA } } } : { "vcs" => { "revision" => SHA } }
+        write_json(dir, "circleci.json", { "pipeline" => { "number" => 3, "created_at" => "2026-10-20T00:00:02Z" }.merge(pipeline_source),
                                            "workflow" => { "status" => "success", "created_at" => "2026-10-20T00:00:03Z", "stopped_at" => "2026-10-20T00:00:36Z" },
                                            "jobs" => [job] + (circle["extra_job"] ? [job.merge("number" => 8)] : []) })
       else
