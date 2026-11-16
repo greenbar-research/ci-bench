@@ -96,8 +96,10 @@ jobs:
           key: ci-bench-pilot-${{ inputs.cache_epoch }}-${{ inputs.profile }}-${{ inputs.runner }}-${{ runner.os }}-${{ hashFiles('Gemfile.lock', 'package-lock.json') }}
           path: |
             vendor/bundle
-            ~/.npm
-            ~/.cache/ms-playwright
+            # circleci-ghac adapter: CircleCI's actions/cache does not expand ~ (pipeline 17
+            # archived only vendor/bundle); its runner home is /home/circleci.
+            /home/circleci/.npm
+            /home/circleci/.cache/ms-playwright
 
       - name: Check cache expectation
         env:
@@ -148,9 +150,13 @@ jobs:
       # circleci-ghac adapter: CircleCI's runner user cannot create the tool cache that
       # ruby/setup-ruby's prebuilt Rubies require (pipeline 15: EACCES mkdir /opt/hostedtoolcache).
       # A no-op where the directory is already writable.
-      - name: Prepare tool cache
+      - name: Prepare tool cache and npm cache ownership
         run: |
           [[ -w /opt/hostedtoolcache ]] || { sudo mkdir -p /opt/hostedtoolcache && sudo chown "$(id -u):$(id -g)" /opt/hostedtoolcache; }
+          # The image's ~/.npm holds root-owned entries, so npm ci fails with EACCES (pipeline 17).
+          if [[ -d "$HOME/.npm" ]] && find "$HOME/.npm" ! -user "$(id -u)" -print -quit | grep -q .; then
+            sudo chown -R "$(id -u):$(id -g)" "$HOME/.npm"
+          fi
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@824c0e29fdfc7d689c191c27acc969d2d04b7dd8 # v1.331.0
