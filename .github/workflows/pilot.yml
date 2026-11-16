@@ -22,7 +22,7 @@ on:
       cache_phase:
         description: cold requires a cache miss; warm requires an exact hit from a successful cold run
         required: false
-        default: cold # circleci-ghac adapter: per-run default
+        default: warm # circleci-ghac adapter: per-run default
         type: choice
         options:
           - cold
